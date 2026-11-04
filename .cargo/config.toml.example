@@ -1,0 +1,16 @@
+# Copy this file to .cargo/config.toml (gitignored) and fill in your own paths, then
+# `cargo build --release`. These values get baked into the compiled binary at build time
+# (see env!() calls in src/main.rs) — there's no runtime config file to edit later, so if
+# a path changes, edit this and rebuild.
+#
+#   cp .cargo/config.toml.example .cargo/config.toml
+
+[env]
+# This repo's own root — the directory containing `pr-review/`, `src/`, `Cargo.toml`, etc.
+# (NOT the api/frontend checkouts — those are configured separately in pr-review/config.sh's
+# REPOS_DIR, since this app never touches them directly, only the scripts it shells out to do.)
+PR_TRACKER_BASE_DIR = "/Users/yourname/wherever-you-cloned-this/pr-tracker"
+
+# Absolute path to the `gh` CLI — run `which gh` to find yours. Apple Silicon Macs with
+# Homebrew usually have it at /opt/homebrew/bin/gh, Intel Macs at /usr/local/bin/gh.
+PR_TRACKER_GH_PATH = "/opt/homebrew/bin/gh"
