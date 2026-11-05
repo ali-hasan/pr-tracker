@@ -16,10 +16,10 @@ const BASE_DIR: &str = env!(
     "PR_TRACKER_BASE_DIR",
     "copy pr-tracker/.cargo/config.toml.example to .cargo/config.toml and set PR_TRACKER_BASE_DIR"
 );
-const GH_PATH: &str = env!(
-    "PR_TRACKER_GH_PATH",
-    "copy pr-tracker/.cargo/config.toml.example to .cargo/config.toml and set PR_TRACKER_GH_PATH (`which gh`)"
-);
+// Unlike BASE_DIR, this is optional — most machines already have `gh` installed
+// somewhere `gh_path()` below finds on its own, so there's nothing to configure.
+// Set PR_TRACKER_GH_PATH in .cargo/config.toml only to pin a specific install.
+const GH_PATH_OVERRIDE: Option<&str> = option_env!("PR_TRACKER_GH_PATH");
 const STATUS_PATH: &str = concat!(env!("PR_TRACKER_BASE_DIR"), "/pr-review/status.json");
 const STATE_PATH: &str = concat!(env!("PR_TRACKER_BASE_DIR"), "/pr-review/state.json");
 const DISMISSED_PATH: &str = concat!(env!("PR_TRACKER_BASE_DIR"), "/pr-review/dismissed.json");
@@ -39,7 +39,7 @@ const REVIEW_PANEL_EXTRA_HEIGHT: f32 = 260.0;
 /// this, so the extra height stays fixed no matter how many comments a
 /// review produced.
 const PUBLISH_PANEL_EXTRA_HEIGHT: f32 = 320.0;
-const REPOS: [&str; 2] = ["cioplenu/backend", "cioplenu/frontend"];
+const REPOS_CONF_PATH: &str = concat!(env!("PR_TRACKER_BASE_DIR"), "/pr-review/repos.conf");
 const GH_POLL_INTERVAL: Duration = Duration::from_secs(45);
 const FILE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -136,7 +136,7 @@ struct SharedState {
     /// finished reviewing but isn't here and isn't in `assigned` has merged or
     /// closed, and build_rows drops it.
     finished_still_open: HashSet<String>,
-    /// Keys hidden via the Hide button, re-checked each poll against the live
+    /// Keys removed via the Remove button, re-checked each poll against the live
     /// head commit: a key drops out of this set (reappears in the tracker) as
     /// soon as new commits land, since the posted comments no longer apply to
     /// the current code.
@@ -223,6 +223,9 @@ struct PrTrackerApp {
     /// publish) needs, so a resize command is only sent when that changes —
     /// not every frame, which would fight a manual drag-resize by the user.
     last_extra_height: f32,
+    /// Repos from repos.conf, reloaded on every `refresh_files` tick (like
+    /// status.json) so adding/removing one takes effect without restarting.
+    repos: Vec<String>,
 }
 
 impl PrTrackerApp {
@@ -239,18 +242,26 @@ impl PrTrackerApp {
             publish_drafts: HashMap::new(),
             adhoc_url: String::new(),
             pending_adhoc: HashMap::new(),
-            local_branch_repo: REPOS[0].to_string(),
+            local_branch_repo: String::new(),
             local_branch_name: String::new(),
             pending_local: HashSet::new(),
             status_message: None,
             status_message_key: None,
             last_extra_height: 0.0,
+            repos: Vec::new(),
         };
         app.refresh_files();
         app
     }
 
     fn refresh_files(&mut self) {
+        self.repos = load_repos();
+        // Keep the dropdown pointed at a real repo once one loads — matters on first
+        // launch, when `new()` had nothing to default it to yet, and again if the
+        // previously-selected repo gets removed from repos.conf out from under it.
+        if !self.repos.contains(&self.local_branch_repo) {
+            self.local_branch_repo = self.repos.first().cloned().unwrap_or_default();
+        }
         self.status = std::fs::read_to_string(STATUS_PATH)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
@@ -283,10 +294,10 @@ impl PrTrackerApp {
             self.status_message_key = None;
             return;
         };
-        if !REPOS.contains(&repo.as_str()) {
+        if !self.repos.contains(&repo) {
             self.status_message = Some(format!(
                 "{repo} isn't one of the repos this is set up for ({})",
-                REPOS.join(", ")
+                self.repos.join(", ")
             ));
             self.status_message_key = None;
             return;
@@ -431,6 +442,51 @@ fn spawn_local_review(key: &str, opts: &ReviewOptions) -> Result<(), String> {
         .map_err(|e| format!("failed to start review: {e}"))
 }
 
+/// Resolves the `gh` binary once and caches it for the rest of the run. An explicit
+/// `PR_TRACKER_GH_PATH` override always wins; otherwise this checks the usual
+/// Homebrew/system install locations, and only as a last resort asks the user's login
+/// shell for its PATH — slower (spawns a shell) but catches a `gh` installed somewhere
+/// a GUI-launched app's own minimal PATH wouldn't otherwise see.
+fn gh_path() -> &'static str {
+    static RESOLVED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    RESOLVED
+        .get_or_init(|| {
+            if let Some(path) = GH_PATH_OVERRIDE {
+                return path.to_string();
+            }
+            for candidate in ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"] {
+                if std::path::Path::new(candidate).is_file() {
+                    return candidate.to_string();
+                }
+            }
+            if let Ok(output) = Command::new("/bin/zsh").args(["-ilc", "command -v gh"]).output() {
+                let found = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !found.is_empty() {
+                    return found;
+                }
+            }
+            "gh".to_string()
+        })
+        .as_str()
+}
+
+/// Reads the `<owner/repo>:<local-folder-name>` lines from repos.conf (same file and
+/// format the shell scripts read via repos.sh) and returns just the `owner/repo` side —
+/// the Rust app only ever needs the repo names themselves (for the GitHub search query,
+/// URL validation, and the local-branch dropdown); the local folder name is only
+/// meaningful to the shell scripts that actually `cd`/`git -C` into it. Missing file or
+/// no valid lines both just come back as an empty list — the UI surfaces that plainly
+/// rather than panicking on a fresh clone that hasn't copied repos.conf.example yet.
+fn load_repos() -> Vec<String> {
+    std::fs::read_to_string(REPOS_CONF_PATH)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| line.split_once(':').map(|(repo, _)| repo.trim().to_string()))
+        .collect()
+}
+
 fn load_json_map(path: &str) -> HashMap<String, String> {
     std::fs::read_to_string(path)
         .ok()
@@ -444,26 +500,11 @@ fn save_json_map(path: &str, map: &HashMap<String, String>) {
     }
 }
 
-/// Hides a reviewed PR by recording the commit it was reviewed at (state.json's
-/// SHA for that key, the same one the report's comments apply to). The
-/// background poll un-hides it again once the live head commit moves past
-/// that SHA — see the pruning step in `main`'s polling loop. A local-branch
-/// key has no state.json entry (those aren't deduped against a stored
-/// commit) — falling back to an empty string there just means it stays
-/// hidden for good, which is right: nothing re-checks a local branch's SHA
-/// to know when to bring it back.
-///
-/// Once hidden, the report and its sidecar are deleted and the status.json entry removed —
-/// by the time you've hidden something you've already acted on it, so there's no reason to
-/// keep a stale file around. If it ever comes back (new commits land), a fresh review writes
-/// a fresh report; state.json is deliberately left alone so that re-review still triggers
-/// correctly off the live commit SHA.
-fn dismiss(key: &str) {
-    let sha = load_json_map(STATE_PATH).remove(key).unwrap_or_default();
-    let mut dismissed = load_json_map(DISMISSED_PATH);
-    dismissed.insert(key.to_string(), sha);
-    save_json_map(DISMISSED_PATH, &dismissed);
-
+/// Deletes a status.json entry along with its report and sidecar — by the time either
+/// `remove()` or `prune_closed_prs()` calls this, there's nothing left to act on, so
+/// there's no reason to keep the files around. Shared so the two call sites (one
+/// user-initiated, one automatic) can't drift apart on what "cleaned up" means.
+fn delete_report(key: &str) {
     let mut status: HashMap<String, StatusEntry> = std::fs::read_to_string(STATUS_PATH)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -473,6 +514,36 @@ fn dismiss(key: &str) {
         let _ = std::fs::remove_file(sidecar_path(&entry.report_path));
         if let Ok(json) = serde_json::to_string_pretty(&status) {
             let _ = std::fs::write(STATUS_PATH, json);
+        }
+    }
+}
+
+/// Removes a reviewed PR by recording the commit it was reviewed at (state.json's
+/// SHA for that key, the same one the report's comments apply to). The background poll
+/// un-hides it again once the live head commit moves past that SHA — see
+/// `prune_dismissed` in `main`'s polling loop. A local-branch key has no state.json
+/// entry (those aren't deduped against a stored commit) — falling back to an empty
+/// string there just means it stays removed for good, which is right: nothing
+/// re-checks a local branch's SHA to know when to bring it back.
+fn remove_reviewed(key: &str) {
+    let sha = load_json_map(STATE_PATH).remove(key).unwrap_or_default();
+    let mut dismissed = load_json_map(DISMISSED_PATH);
+    dismissed.insert(key.to_string(), sha);
+    save_json_map(DISMISSED_PATH, &dismissed);
+    delete_report(key);
+}
+
+/// Cleans up PR-keyed status.json entries for PRs that have actually merged or
+/// closed (not just "no longer requesting my review but still open" — that case is
+/// `still_open` and stays visible via `finished_still_open`). Once a PR is gone for
+/// good there's no row left to click Remove on — closed/merged PRs are never shown —
+/// so without this, their reports would sit in pr-reviews/ forever with no way to
+/// clear them. Local-branch keys (no `#`) are left alone; they have no GitHub PR to
+/// check a merge/close state against.
+fn prune_closed_prs(assigned_keys: &HashSet<String>, still_open: &HashSet<String>) {
+    for key in load_status_keys() {
+        if is_pr_key(&key) && !assigned_keys.contains(&key) && !still_open.contains(&key) {
+            delete_report(&key);
         }
     }
 }
@@ -546,7 +617,7 @@ fn publish_pending_review(key: &str, draft: &PublishDraft) -> Result<String, Str
     let payload_bytes =
         serde_json::to_vec(&payload).map_err(|e| format!("failed to build request body: {e}"))?;
 
-    let mut child = Command::new(GH_PATH)
+    let mut child = Command::new(gh_path())
         .args([
             "api",
             "--method",
@@ -604,6 +675,9 @@ struct Palette {
     inactive_bg: egui::Color32,
     hovered_bg: egui::Color32,
     active_bg: egui::Color32,
+    card_bg: egui::Color32,
+    card_border: egui::Color32,
+    muted_text: egui::Color32,
 }
 
 const DARK: Palette = Palette {
@@ -614,6 +688,9 @@ const DARK: Palette = Palette {
     inactive_bg: egui::Color32::from_rgb(40, 42, 48),
     hovered_bg: egui::Color32::from_rgb(55, 58, 66),
     active_bg: egui::Color32::from_rgb(70, 74, 84),
+    card_bg: egui::Color32::from_rgb(32, 33, 39),
+    card_border: egui::Color32::from_rgb(46, 48, 55),
+    muted_text: egui::Color32::from_rgb(150, 153, 163),
 };
 
 const LIGHT: Palette = Palette {
@@ -624,7 +701,42 @@ const LIGHT: Palette = Palette {
     inactive_bg: egui::Color32::from_rgb(230, 231, 235),
     hovered_bg: egui::Color32::from_rgb(219, 221, 227),
     active_bg: egui::Color32::from_rgb(205, 208, 216),
+    card_bg: egui::Color32::from_rgb(255, 255, 255),
+    card_border: egui::Color32::from_rgb(227, 228, 232),
+    muted_text: egui::Color32::from_rgb(120, 122, 130),
 };
+
+fn palette(ui: &egui::Ui) -> &'static Palette {
+    if ui.visuals().dark_mode {
+        &DARK
+    } else {
+        &LIGHT
+    }
+}
+
+/// A rounded, tinted badge for a review outcome — distinct hue per outcome so the
+/// list reads at a glance without parsing the text. Unknown/empty outcomes
+/// (shouldn't happen, but `Row.outcome` is an `Option<String>`) fall back to gray
+/// rather than panicking on an unrecognized string.
+fn outcome_color(outcome: &str) -> egui::Color32 {
+    match outcome {
+        "approve" => egui::Color32::from_rgb(98, 209, 150),
+        "request-changes" => egui::Color32::from_rgb(235, 120, 120),
+        "needs-discussion" => egui::Color32::from_rgb(230, 180, 90),
+        _ => egui::Color32::from_rgb(150, 160, 180),
+    }
+}
+
+fn outcome_pill(ui: &mut egui::Ui, outcome: &str) {
+    let color = outcome_color(outcome);
+    egui::Frame::new()
+        .fill(color.gamma_multiply(0.18))
+        .corner_radius(egui::CornerRadius::same(255))
+        .inner_margin(egui::Margin::symmetric(8, 2))
+        .show(ui, |ui| {
+            ui.colored_label(color, outcome);
+        });
+}
 
 /// Styles both the Dark and Light egui themes and leaves `Context`'s theme
 /// preference at its default (`ThemePreference::System`), so the window
@@ -831,18 +943,28 @@ impl eframe::App for PrTrackerApp {
             if let Some(msg) = &self.status_message {
                 ui.colored_label(egui::Color32::from_rgb(120, 170, 255), msg);
             }
+            if self.repos.is_empty() {
+                ui.colored_label(
+                    egui::Color32::RED,
+                    "no repos configured — copy pr-review/repos.conf.example to \
+                     pr-review/repos.conf and list the repos you want reviewed",
+                );
+            }
             ui.horizontal(|ui| {
                 ui.label("Review a PR by URL:");
                 ui.add(
                     egui::TextEdit::singleline(&mut self.adhoc_url)
                         .desired_width(340.0)
-                        .hint_text("https://github.com/cioplenu/backend/pull/1234"),
+                        .hint_text(format!(
+                            "https://github.com/{}/pull/1234",
+                            self.repos.first().map(String::as_str).unwrap_or("owner/repo")
+                        )),
                 );
                 // Only enabled once the field actually parses to a PR URL on a
                 // supported repo, so a stray click on an empty/placeholder field
                 // can't fire a confusing "couldn't find a PR URL" message.
                 let valid = parse_pr_url(&self.adhoc_url)
-                    .is_some_and(|(repo, _)| REPOS.contains(&repo.as_str()));
+                    .is_some_and(|(repo, _)| self.repos.contains(&repo));
                 if ui
                     .add_enabled(valid, egui::Button::new("Review…"))
                     .clicked()
@@ -855,8 +977,8 @@ impl eframe::App for PrTrackerApp {
                 egui::ComboBox::from_id_salt("local_branch_repo")
                     .selected_text(short_repo(&self.local_branch_repo))
                     .show_ui(ui, |ui| {
-                        for repo in REPOS {
-                            ui.selectable_value(&mut self.local_branch_repo, repo.to_string(), short_repo(repo));
+                        for repo in &self.repos {
+                            ui.selectable_value(&mut self.local_branch_repo, repo.clone(), short_repo(repo));
                         }
                     });
                 ui.add(
@@ -955,77 +1077,95 @@ impl eframe::App for PrTrackerApp {
 
             let mut clicked_report: Option<String> = None;
             let mut clicked_configure: Option<String> = None;
-            let mut clicked_hide: Option<String> = None;
+            let mut clicked_remove: Option<String> = None;
             let mut clicked_publish: Option<(String, String)> = None;
 
-            egui::Grid::new("pr_rows")
-                .striped(true)
-                .num_columns(5)
-                .min_col_width(60.0)
-                .spacing(egui::vec2(14.0, 6.0))
-                .show(ui, |ui| {
-                    ui.strong("PR");
-                    ui.strong("Title");
-                    ui.strong("Stage");
-                    ui.strong("Outcome");
-                    ui.strong("");
-                    ui.end_row();
+            let pal = palette(ui);
+            for row in &rows {
+                let card_id = ui.make_persistent_id(("pr_card", &row.key));
+                let hovered = ui.ctx().data(|d| d.get_temp::<bool>(card_id)).unwrap_or(false);
+                let bg_t = ui.ctx().animate_bool_with_time(card_id, hovered, 0.12);
+                let bg = pal.card_bg.lerp_to_gamma(pal.hovered_bg, bg_t * 0.5);
 
-                    for row in &rows {
-                        if ui.link(&row.label).clicked() {
-                            open_url(&row.pr_url);
-                        }
-                        // Capped width so a long title can't push the Stage/Outcome/Actions
-                        // columns off the right edge of the window; full text on hover.
-                        ui.scope(|ui| {
-                            ui.set_max_width(340.0);
-                            ui.add(egui::Label::new(&row.title).truncate())
-                                .on_hover_text(&row.title);
-                        });
-                        ui.colored_label(stage_color(row.stage), row.stage);
-                        ui.label(row.outcome.as_deref().unwrap_or("-"));
+                let frame_response = egui::Frame::new()
+                    .fill(bg)
+                    .stroke(egui::Stroke::new(1.0, pal.card_border))
+                    .corner_radius(egui::CornerRadius::same(10))
+                    .inner_margin(egui::Margin::symmetric(14, 10))
+                    .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            let reviewed = !row.action_label.is_empty();
-                            if reviewed && ui.button(row.action_label).clicked() {
-                                clicked_report = Some(row.action_target.clone());
+                            ui.colored_label(stage_color(row.stage), "●");
+                            if ui.link(&row.label).clicked() {
+                                open_url(&row.pr_url);
                             }
-                            if ui.button("Review…").clicked() {
-                                clicked_configure = Some(row.key.clone());
-                            }
-                            // A local branch has no PR yet, so there's nothing to attach a
-                            // GitHub review to.
-                            if reviewed
-                                && is_pr_key(&row.key)
-                                && ui
-                                    .button("Publish…")
-                                    .on_hover_text(
-                                        "Draft these comments as a pending GitHub review",
-                                    )
-                                    .clicked()
-                            {
-                                clicked_publish = Some((row.key.clone(), row.action_target.clone()));
-                            }
-                            if reviewed
-                                && ui
-                                    .button("Hide")
-                                    .on_hover_text(
-                                        "Hide until new commits are pushed to this PR",
-                                    )
-                                    .clicked()
-                            {
-                                clicked_hide = Some(row.key.clone());
-                            }
+                            // Capped width so a long title can't push the outcome pill off
+                            // the right edge of the window; full text on hover.
+                            ui.scope(|ui| {
+                                ui.set_max_width(380.0);
+                                ui.add(egui::Label::new(&row.title).truncate())
+                                    .on_hover_text(&row.title);
+                            });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if let Some(outcome) = &row.outcome {
+                                    outcome_pill(ui, outcome);
+                                }
+                            });
                         });
-                        ui.end_row();
-                    }
-                });
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            ui.colored_label(pal.muted_text, row.stage);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                let reviewed = !row.action_label.is_empty();
+                                if reviewed
+                                    && ui
+                                        .button("Remove")
+                                        .on_hover_text(
+                                            "Delete this report — comes back if new commits are pushed to this PR",
+                                        )
+                                        .clicked()
+                                {
+                                    clicked_remove = Some(row.key.clone());
+                                }
+                                // A local branch has no PR yet, so there's nothing to attach a
+                                // GitHub review to.
+                                if reviewed
+                                    && is_pr_key(&row.key)
+                                    && ui
+                                        .button("Publish…")
+                                        .on_hover_text(
+                                            "Draft these comments as a pending GitHub review",
+                                        )
+                                        .clicked()
+                                {
+                                    clicked_publish =
+                                        Some((row.key.clone(), row.action_target.clone()));
+                                }
+                                if ui.button("Review…").clicked() {
+                                    clicked_configure = Some(row.key.clone());
+                                }
+                                if reviewed && ui.button(row.action_label).clicked() {
+                                    clicked_report = Some(row.action_target.clone());
+                                }
+                            });
+                        });
+                    })
+                    .response;
+
+                let now_hovered = frame_response.hovered();
+                if now_hovered != hovered {
+                    ui.ctx()
+                        .data_mut(|d| d.insert_temp(card_id, now_hovered));
+                    ui.ctx().request_repaint();
+                }
+                ui.add_space(6.0);
+            }
 
             if let Some(path) = clicked_report {
                 open_report(&path);
             }
-            if let Some(key) = clicked_hide {
+            if let Some(key) = clicked_remove {
                 self.shared.lock().unwrap().dismissed.insert(key.clone());
-                dismiss(&key);
+                remove_reviewed(&key);
             }
             if let Some(key) = clicked_configure {
                 self.configuring = Some(key);
@@ -1248,22 +1388,25 @@ impl eframe::App for PrTrackerApp {
     }
 }
 
-fn fetch_assigned() -> Result<Vec<GhPr>, String> {
-    let output = Command::new(GH_PATH)
-        .args([
-            "search",
-            "prs",
-            "--review-requested",
-            "@me",
-            "--state",
-            "open",
-            "--repo",
-            REPOS[0],
-            "--repo",
-            REPOS[1],
-            "--json",
-            "number,title,url,repository",
-        ])
+fn fetch_assigned(repos: &[String]) -> Result<Vec<GhPr>, String> {
+    if repos.is_empty() {
+        // Rather than run an unscoped `gh search prs` across every repo the token can
+        // see — never what's wanted — surface the same "go configure this" message the
+        // UI already shows when repos.conf is empty or missing.
+        return Err(
+            "no repos configured — copy pr-review/repos.conf.example to repos.conf".to_string(),
+        );
+    }
+    let mut args = vec!["search", "prs", "--review-requested", "@me", "--state", "open"];
+    for repo in repos {
+        args.push("--repo");
+        args.push(repo);
+    }
+    args.push("--json");
+    args.push("number,title,url,repository");
+
+    let output = Command::new(gh_path())
+        .args(&args)
         .output()
         .map_err(|e| format!("failed to spawn gh: {e}"))?;
 
@@ -1278,7 +1421,7 @@ fn is_pr_still_open(key: &str) -> bool {
     let Some((repo, number)) = key.split_once('#') else {
         return false;
     };
-    let output = Command::new(GH_PATH)
+    let output = Command::new(gh_path())
         .args(["pr", "view", number, "--repo", repo, "--json", "state"])
         .output();
 
@@ -1333,7 +1476,7 @@ struct GhPrTitleUrl {
 /// right away instead of a placeholder — also doubles as validation that the
 /// URL actually points at a PR you can see before a review panel opens for it.
 fn fetch_pr_title(repo: &str, number: u64) -> Result<(String, String), String> {
-    let output = Command::new(GH_PATH)
+    let output = Command::new(gh_path())
         .args(["pr", "view", &number.to_string(), "--repo", repo, "--json", "title,url"])
         .output()
         .map_err(|e| format!("failed to run gh: {e}"))?;
@@ -1347,7 +1490,7 @@ fn fetch_pr_title(repo: &str, number: u64) -> Result<(String, String), String> {
 
 fn fetch_head_sha(key: &str) -> Option<String> {
     let (repo, number) = key.split_once('#')?;
-    let output = Command::new(GH_PATH)
+    let output = Command::new(gh_path())
         .args(["pr", "view", number, "--repo", repo, "--json", "headRefOid"])
         .output()
         .ok()?;
@@ -1410,7 +1553,7 @@ fn main() -> eframe::Result<()> {
     {
         let shared = Arc::clone(&shared);
         std::thread::spawn(move || loop {
-            let result = fetch_assigned();
+            let result = fetch_assigned(&load_repos());
 
             if let Ok(prs) = &result {
                 maybe_auto_review(prs);
@@ -1428,6 +1571,12 @@ fn main() -> eframe::Result<()> {
                 .filter(|key| !assigned_keys.contains(key))
                 .filter(|key| is_pr_still_open(key))
                 .collect();
+            // Only once the search itself actually succeeded — on a transient `gh` failure
+            // `assigned_keys` comes back empty, which would otherwise look exactly like
+            // every tracked PR merging at once and wipe their reports.
+            if result.is_ok() {
+                prune_closed_prs(&assigned_keys, &still_open);
+            }
             let dismissed = prune_dismissed();
 
             let mut s = shared.lock().unwrap();

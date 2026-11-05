@@ -7,8 +7,7 @@ status changes). This is a read-only, local-report-only workflow.
 
 | GitHub repo | Local path |
 |---|---|
-| cioplenu/backend | {{REPOS_DIR}}/api |
-| cioplenu/frontend | {{REPOS_DIR}}/frontend |
+{{REPO_TABLE}}
 
 State file: {{BASE_DIR}}/pr-review/state.json
 Status file (for the tracker app, see Step 5): {{BASE_DIR}}/pr-review/status.json
@@ -21,7 +20,7 @@ Report format rules (read this before Step 4, follow it exactly): {{BASE_DIR}}/p
 Run exactly:
 
 ```
-gh search prs --review-requested @me --state open --repo cioplenu/backend --repo cioplenu/frontend --json number,title,url,repository
+gh search prs --review-requested @me --state open {{REPO_SEARCH_ARGS}} --json number,title,url,repository
 ```
 
 This returns PRs where I am requested as a reviewer — NOT PRs I authored. Do not use `--assignee`,
@@ -67,8 +66,7 @@ For each ticket ID found, call `mcp__youtrack__get_issue` with that ID.
 ### Review the diff — three layers feeding one list of comments, never posted anywhere
 
 **Layer 1 — repo approval-readiness rubric.** Read and apply:
-- cioplenu/backend → {{REPOS_DIR}}/api/.github/skills/code-review/SKILL.md
-- cioplenu/frontend → {{REPOS_DIR}}/frontend/.github/skills/code-review/SKILL.md
+{{REPO_SKILL_LIST}}
 
 This decides auto-approvable vs. needs-human-review per that repo's own stated categories. Keep the
 reasoning for this to one short line — name the rule, don't quote or restate it at length.

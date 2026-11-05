@@ -11,6 +11,7 @@
 # REPOS_DIR, since this app never touches them directly, only the scripts it shells out to do.)
 PR_TRACKER_BASE_DIR = "/Users/yourname/wherever-you-cloned-this/pr-tracker"
 
-# Absolute path to the `gh` CLI — run `which gh` to find yours. Apple Silicon Macs with
-# Homebrew usually have it at /opt/homebrew/bin/gh, Intel Macs at /usr/local/bin/gh.
-PR_TRACKER_GH_PATH = "/opt/homebrew/bin/gh"
+# Optional. The app auto-detects `gh` on its own (checks the usual Homebrew/system
+# locations, then falls back to your login shell's PATH) — uncomment this only if you
+# need to pin a specific install.
+# PR_TRACKER_GH_PATH = "/opt/homebrew/bin/gh"

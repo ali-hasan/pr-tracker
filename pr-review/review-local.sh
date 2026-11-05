@@ -8,18 +8,27 @@ if [[ ! -f "$SCRIPT_DIR/config.sh" ]]; then
   echo "review-local.sh: $SCRIPT_DIR/config.sh not found — copy config.sh.example to config.sh and fill in CLAUDE_BIN + REPOS_DIR" >&2
   exit 1
 fi
+export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
 CLAUDE_BIN=""
 REPOS_DIR=""
 source "$SCRIPT_DIR/config.sh"
-if [[ -z "$CLAUDE_BIN" || -z "$REPOS_DIR" ]]; then
-  echo "review-local.sh: CLAUDE_BIN and REPOS_DIR must both be set in $SCRIPT_DIR/config.sh" >&2
+if [[ -z "$REPOS_DIR" ]]; then
+  echo "review-local.sh: REPOS_DIR must be set in $SCRIPT_DIR/config.sh" >&2
+  exit 1
+fi
+if [[ -z "$CLAUDE_BIN" ]]; then
+  CLAUDE_BIN="$(command -v claude || true)"
+fi
+if [[ -z "$CLAUDE_BIN" ]]; then
+  echo "review-local.sh: couldn't find claude on PATH — set CLAUDE_BIN explicitly in $SCRIPT_DIR/config.sh" >&2
   exit 1
 fi
 
+source "$SCRIPT_DIR/repos.sh"
+
 LOG_FILE="$SCRIPT_DIR/run.log"
 RUNNING_FILE="$SCRIPT_DIR/RUNNING"
-
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 
 REPO=""
 BRANCH=""
@@ -54,11 +63,11 @@ if [[ -f "$RUNNING_FILE" ]]; then
   exit 1
 fi
 
-case "$REPO" in
-  cioplenu/backend) LOCAL_PATH="$REPOS_DIR/api" ;;
-  cioplenu/frontend) LOCAL_PATH="$REPOS_DIR/frontend" ;;
-  *) echo "review-local.sh: unknown repo $REPO" >> "$LOG_FILE"; exit 1 ;;
-esac
+LOCAL_PATH=""
+if ! local_path_for_repo "$REPO"; then
+  echo "review-local.sh: unknown repo $REPO (not listed in repos.conf)" >> "$LOG_FILE"
+  exit 1
+fi
 
 if [[ -z "$BASE_BRANCH" ]]; then
   BASE_BRANCH=$(git -C "$LOCAL_PATH" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
@@ -221,7 +230,7 @@ PYEOF
 )
 
 "$CLAUDE_BIN" -p "$PROMPT" \
-  --allowedTools "Bash(git -C $REPOS_DIR/api:*)" "Bash(git -C $REPOS_DIR/frontend:*)" "Bash(gh api repos/cioplenu/*)" "Bash(osascript:*)" "Bash(open vscode://*)" "Read" "Write" "mcp__youtrack__get_issue" "Skill" \
+  --allowedTools "Bash(git -C $LOCAL_PATH:*)" "Bash(gh api repos/${REPO%%/*}/*)" "Bash(osascript:*)" "Bash(open vscode://*)" "Read" "Write" "mcp__youtrack__get_issue" "Skill" \
   --permission-prompts none \
   >> "$LOG_FILE" 2>&1
 

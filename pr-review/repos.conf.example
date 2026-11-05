@@ -1,0 +1,16 @@
+# One repo per line: <owner/repo>:<local-folder-name-under-REPOS_DIR>
+#
+# cp repos.conf.example repos.conf
+# then list the repos you want reviewed — any number, not just two.
+#
+# The left side is the exact "owner/repo" GitHub uses (what `gh search prs`,
+# PR URLs, and `gh api repos/<owner>/<repo>` all expect). The right side is
+# just the folder name your local checkout of it lives in, relative to
+# REPOS_DIR (set in config.sh) — it doesn't have to match the GitHub repo
+# name, e.g. a repo named "backend" on GitHub checked out locally as "api".
+#
+# Adding or removing a repo here takes effect on the next poll/click — no
+# rebuild, no restart.
+
+cioplenu/backend:api
+cioplenu/frontend:frontend

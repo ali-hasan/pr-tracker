@@ -56,7 +56,9 @@ All state lives in plain JSON files under `pr-review/` — no database, no serve
 | `prompt.md` | you (hand-edited) | `run.sh` | the scheduled-run instruction set |
 | `report-format.md` | you (hand-edited) | every review | shared rules: line verification, link format, voice, report structure, JSON sidecar shape |
 | `review-criteria.md` | you (hand-edited) | every review | layer 3, your own standing rules — empty by default |
-| `config.sh` | you, from `config.sh.example` | `run.sh`, `review-one.sh`, `review-local.sh` | the two per-machine values, `CLAUDE_BIN` and `REPOS_DIR` — **not committed** |
+| `config.sh` | you, from `config.sh.example` | `run.sh`, `review-one.sh`, `review-local.sh` | `REPOS_DIR` (required) and an optional `CLAUDE_BIN` override — **not committed** |
+| `repos.conf` | you, from `repos.conf.example` | the Rust app, `repos.sh` | which repos to review and their local folder name — **not committed** |
+| `repos.sh` | tracked | `run.sh`, `review-one.sh`, `review-local.sh` | shared loader for `repos.conf` |
 | `run.sh` | tracked | `launchd` | wraps the scheduled `claude -p` call, logs, concurrency guard |
 | `review-one.sh` | tracked | tracker app | one-off re-review of a specific PR with UI-selected options |
 | `review-local.sh` | tracked | tracker app | reviews a local git branch against its base branch, no PR needed |
@@ -127,7 +129,10 @@ worth knowing about going in.
 - **Claude Code**, authenticated, logged into whichever org/workspace provisions the `code-review`
   plugin skill (ask around if you're not sure which one that is).
 - **`gh` CLI**, authenticated (`gh auth status`) with access to the repos you want reviewed. No
-  extra scope is needed for Publish — review creation uses whatever `gh` already has.
+  extra scope is needed for Publish — review creation uses whatever `gh` already has. Both the
+  tracker app and the shell scripts auto-detect `gh` and `claude` on their own (common install
+  locations, then your login shell's PATH as a fallback) — if both are already set up and
+  authenticated the normal way, there's nothing to point at them explicitly.
 - **YouTrack MCP connector** (or whatever ticket tracker's MCP server) connected in Claude Code,
   for the ticket-lookup step — if you don't use YouTrack, that one step in `prompt.md` /
   `review-one.sh` / `review-local.sh` just needs deleting.
@@ -141,20 +146,22 @@ This repo can be cloned anywhere — `~/code/pr-tracker`, `~/tools/pr-tracker`, 
 fixed relationship to where you keep your actual `api`/`frontend` checkouts; you tell it that
 location explicitly in step 2 below.
 
-1. Clone this repo. If the repos you want reviewed aren't named `cioplenu/backend` /
-   `cioplenu/frontend`, or don't live at `api/` / `frontend/` inside wherever you keep them, edit
-   the `case "$REPO" in ... esac` block near the top of `review-one.sh` and `review-local.sh`
-   (three lines each) and the `REPOS` constant near the top of `pr-tracker/src/main.rs` — these are
-   the one place each that lists which repos exist, left as plain, easy-to-find code rather than a
-   config format, since adding or removing a reviewed repo is rare and deliberate.
+1. Clone this repo.
 2. ```
    cd pr-review
    cp config.sh.example config.sh
+   cp repos.conf.example repos.conf
    ```
-   Edit `config.sh`: set `CLAUDE_BIN` to the output of `which claude`, and `REPOS_DIR` to the
-   absolute path of the directory containing your `api`/`frontend` checkouts — e.g. if you have
-   `~/workspace/ops1/api` and `~/workspace/ops1/frontend`, that's `~/workspace/ops1`, regardless of
-   where you cloned *this* repo. There's no way to infer this one — it has to be set.
+   Edit `config.sh`: set `REPOS_DIR` to the absolute path of the directory containing your repo
+   checkouts — e.g. if you have `~/workspace/ops1/api` and `~/workspace/ops1/frontend`, that's
+   `~/workspace/ops1`, regardless of where you cloned *this* repo. There's no way to infer this
+   one — it has to be set. Leave `CLAUDE_BIN` blank unless auto-detection can't find yours (see §3).
+
+   Edit `repos.conf` to list the repos you want reviewed, one per line as
+   `<owner/repo>:<local-folder-name>` — the folder name is relative to `REPOS_DIR` and doesn't have
+   to match the GitHub repo name. Any number of repos, across any number of orgs. Changing this
+   file later (adding, removing, renaming) takes effect on the next poll or click — no rebuild, no
+   restart, and nothing else to edit.
 3. Decide what to do about `my-voice` — see §2. If you're skipping it, remove the "load the
    `my-voice` skill" line from `report-format.md`'s Voice section.
 4. If you use a different ticket tracker than YouTrack, remove the `mcp__youtrack__get_issue`
@@ -172,10 +179,10 @@ location explicitly in step 2 below.
    cp .cargo/config.toml.example .cargo/config.toml
    ```
    Edit `.cargo/config.toml`: set `PR_TRACKER_BASE_DIR` to *this repo's own* absolute root path
-   (not `REPOS_DIR` — the app never touches `api`/`frontend` directly, only the scripts above do),
-   and `PR_TRACKER_GH_PATH` to the output of `which gh` (Apple Silicon: `/opt/homebrew/bin/gh`,
-   Intel: `/usr/local/bin/gh`). These are baked into the binary at compile time — if either path
-   ever changes, edit this file and rebuild, there's no runtime config to update instead. Then:
+   (not `REPOS_DIR` — the app never touches `api`/`frontend` directly, only the scripts above do).
+   This is baked into the binary at compile time — if it ever changes, edit this file and rebuild,
+   there's no runtime config to update instead. Leave `PR_TRACKER_GH_PATH` commented out unless
+   auto-detection can't find your `gh` (see §3). Then:
    ```
    ./package-app.sh
    ```
@@ -196,8 +203,8 @@ location explicitly in step 2 below.
 
 ## 5. What never gets committed (see `.gitignore`)
 
-- `pr-review/config.sh` / `.cargo/config.toml` — per-machine paths, not secrets, but no reason to
-  commit someone else's.
+- `pr-review/config.sh` / `pr-review/repos.conf` / `.cargo/config.toml` — per-machine paths and
+  which repos you review, not secrets, but no reason to commit someone else's.
 - `pr-review/state.json`, `status.json`, `dismissed.json`, `RUNNING`, `run.log*`, `launchd.log` —
   this machine's own review history and locks, regenerated from scratch by the pipeline.
 - `pr-reviews/` — the actual review reports. Proprietary PR content, and stale the moment anyone

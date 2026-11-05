@@ -2,15 +2,16 @@
 # secret, but it's machine-specific and there's no reason to commit someone else's paths).
 #
 # cp config.sh.example config.sh
-# then edit both lines below.
-
-# Absolute path to the `claude` CLI binary — run `which claude` to find yours. This has to
-# be an absolute path, not just "claude": launchd runs scheduled jobs with a minimal PATH
-# that usually doesn't include wherever your interactive shell finds it.
-CLAUDE_BIN="/Users/yourname/.local/bin/claude"
+# then edit REPOS_DIR below. CLAUDE_BIN only needs editing if auto-detection doesn't find it.
 
 # Absolute path to the directory where you've checked out the repos this reviews — NOT this
 # repo. E.g. if you have ~/workspace/ops1/api and ~/workspace/ops1/frontend, this is
 # ~/workspace/ops1. There's no way to infer this one: pr-tracker is its own repo and can be
 # cloned anywhere, with no fixed relationship to where you keep your actual code checkouts.
 REPOS_DIR="/Users/yourname/workspace/ops1"
+
+# Optional. Left blank, every script that needs `claude` auto-detects it (after adding
+# ~/.local/bin and the usual Homebrew/system dirs to PATH). Only set this if that doesn't
+# find yours — e.g. an install in a less common location — or to pin a specific one:
+# CLAUDE_BIN="/Users/yourname/.local/bin/claude"
+CLAUDE_BIN=""
