@@ -216,31 +216,3 @@ location explicitly in step 2 below.
 Nothing in this repo ever held an actual API token or credential — `gh` and Claude Code both
 handle their own auth outside of it (`gh auth login`, Claude Code's own login), and the YouTrack
 MCP connection is configured in Claude Code's own settings, not a file here.
-
-## 6. Worked example — one PR, start to finish
-
-Take `cioplenu/frontend#1993` (a Sentry grouping fix):
-
-1. **Detection**: the tracker app's 45-second poll sees `cioplenu/frontend#1993` in
-   `gh search prs --review-requested @me --state open`, fetches its `headRefOid`, and finds it's
-   not in `state.json` yet (or differs from what's stored) → spawns a review for it.
-2. **Context**: `gh pr view` for title/body/branch/commits, `gh pr diff` for the diff.
-3. **Ticket**: scans title/body/branch/commits for `DEV-\d+`, finds the ticket ID, calls
-   `mcp__youtrack__get_issue`, checks the ticket's scope roughly matches the diff.
-4. **Line-number safety check**: for every finding, before citing `file:line`, fetches the real
-   file at that commit and greps for the exact line — never computes a line number from the diff's
-   hunk headers by hand, which has been wrong by hundreds of lines before.
-5. **Three-layer review**: reads the repo's own `SKILL.md` for the one-line approvability call,
-   invokes `code-review low <PR URL>`, reads `review-criteria.md`.
-6. **Voice**: loads `my-voice` (if present), collapses all three layers into one flat list of
-   short, direct comments.
-7. **Report + sidecar written** to `pr-reviews/frontend-1993.md` and `.json`.
-8. **State updated**, notification fires, report opens automatically in VS Code.
-9. **Tracker app** picks up `status.json` on its next 2-second file poll, shows the row as
-   **Done / request-changes**.
-10. You read it. Either: click **Publish…**, tick the comments you want, create the draft review,
-    finish and submit it yourself on GitHub — or post it however you normally would and skip
-    Publish entirely. The automation itself never posts anything either way.
-11. Click **Hide** once you're done with it — the current SHA is recorded in `dismissed.json`, the
-    row disappears. If the author pushes a fix, the next poll notices the live head commit no
-    longer matches what's hidden, drops the entry, and the row reappears.
