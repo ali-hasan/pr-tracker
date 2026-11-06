@@ -53,6 +53,14 @@ re-review's old report is stale). Keep the whole thing short, a flat structure, 
 ```markdown
 # <repo-short-name>#<number> — <title>
 <url> · ticket: <DEV-XXXX or "none found", one line, flag here if scope doesn't match the PR>
+Reviewed by: <comma-separated list of whichever layers you were actually told to run this time, e.g.
+"repo rubric, code-review skill (low), review-criteria.md" — leave out any layer you weren't asked to
+run, and add the one-off ask itself (not just "Layer 4") if there was one>
+
+<two or three plain sentences on what this PR actually does/is trying to achieve, in your own words
+from the title, body, and diff — not a finding, not a restatement of the ticket, just "what is this
+for" so I can tell at a glance without reading the diff myself. Skip entirely if the title alone
+already says it all (e.g. "Bump lodash to 4.17.21" needs nothing more).>
 
 <one-line approval-readiness call: "can't auto-approve, adds a package.json dep" / "auto-approvable,
 pure refactor" / etc — name the rule in a few words, nothing longer>
