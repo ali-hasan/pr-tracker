@@ -1012,7 +1012,15 @@ impl eframe::App for PrTrackerApp {
             // finished_still_open path doesn't know about yet. Once that path does
             // catch up with the same key (next gh poll), this prunes itself so the
             // key is never shown twice.
+            //
+            // `cancelable` tracks which of these are still just a client-side placeholder
+            // (no status.json entry yet) — those have no file on disk to clean up, so
+            // Remove on one of them just drops it from pending_adhoc/pending_local instead
+            // of going through `remove_reviewed`. Covers e.g. a typo'd branch name typed
+            // into "Review a local branch" that never actually ran: with nothing persisted
+            // anywhere, there was previously no way to clear it short of restarting the app.
             let seen: HashSet<String> = rows.iter().map(|r| r.key.clone()).collect();
+            let mut cancelable: HashSet<String> = HashSet::new();
             for (key, (title, url)) in &self.pending_adhoc {
                 if seen.contains(key) {
                     continue;
@@ -1029,6 +1037,7 @@ impl eframe::App for PrTrackerApp {
                         action_target: entry.report_path.clone(),
                     });
                 } else {
+                    cancelable.insert(key.clone());
                     rows.push(Row {
                         key: key.clone(),
                         label: key_label(key),
@@ -1051,6 +1060,7 @@ impl eframe::App for PrTrackerApp {
                 if seen.contains(key) {
                     continue;
                 }
+                cancelable.insert(key.clone());
                 let (repo, branch) = key.split_once('@').unwrap_or((key.as_str(), ""));
                 rows.push(Row {
                     key: key.clone(),
@@ -1116,12 +1126,15 @@ impl eframe::App for PrTrackerApp {
                             ui.colored_label(pal.muted_text, row.stage);
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let reviewed = !row.action_label.is_empty();
-                                if reviewed
+                                let removable = reviewed || cancelable.contains(&row.key);
+                                if removable
                                     && ui
                                         .button("Remove")
-                                        .on_hover_text(
-                                            "Delete this report — comes back if new commits are pushed to this PR",
-                                        )
+                                        .on_hover_text(if reviewed {
+                                            "Delete this report — comes back if new commits are pushed to this PR"
+                                        } else {
+                                            "Cancel — this hasn't been reviewed yet"
+                                        })
                                         .clicked()
                                 {
                                     clicked_remove = Some(row.key.clone());
@@ -1164,8 +1177,16 @@ impl eframe::App for PrTrackerApp {
                 open_report(&path);
             }
             if let Some(key) = clicked_remove {
-                self.shared.lock().unwrap().dismissed.insert(key.clone());
-                remove_reviewed(&key);
+                // A still-pending entry (no status.json yet, e.g. a typo'd local branch
+                // that never actually ran) has nothing on disk to clean up — just drop
+                // the client-side placeholder. Anything else goes through the normal
+                // reviewed-PR removal path.
+                let was_pending =
+                    self.pending_adhoc.remove(&key).is_some() || self.pending_local.remove(&key);
+                if !was_pending {
+                    self.shared.lock().unwrap().dismissed.insert(key.clone());
+                    remove_reviewed(&key);
+                }
             }
             if let Some(key) = clicked_configure {
                 self.configuring = Some(key);
