@@ -1351,9 +1351,13 @@ impl eframe::App for PrTrackerApp {
                         }
 
                         ui.horizontal(|ui| {
+                            // Once this succeeds, a second click creates a conflicting second
+                            // pending review on GitHub (fails with an unhelpful 422) — stay
+                            // disabled for good rather than just while the request is in flight.
+                            let already_published = matches!(draft.result, Some(Ok(_)));
                             if ui
                                 .add_enabled(
-                                    !draft.publishing,
+                                    !draft.publishing && !already_published,
                                     egui::Button::new("Create draft review"),
                                 )
                                 .clicked()
