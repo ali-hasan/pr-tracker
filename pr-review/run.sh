@@ -12,6 +12,7 @@ if [[ ! -f "$SCRIPT_DIR/config.sh" ]]; then
 fi
 CLAUDE_BIN=""
 REPOS_DIR=""
+REVIEW_MODEL=""
 source "$SCRIPT_DIR/config.sh"
 if [[ -z "$REPOS_DIR" ]]; then
   echo "run.sh: REPOS_DIR must be set in $SCRIPT_DIR/config.sh" >&2
@@ -36,6 +37,39 @@ if [[ -f "$SCRIPT_DIR/RUNNING" ]]; then
 fi
 
 echo "=== Run started: $(date) ===" >> "$LOG_FILE"
+
+# Most of these half-hourly runs find nothing new, so the check itself is done here in plain
+# shell (the same search and commit comparison as prompt.md's Steps 1–2) and Claude only
+# starts when at least one PR is new or has new commits since its last review.
+SEARCH_REPO_ARGS=()
+for repo in "${REPO_NAMES[@]}"; do
+  SEARCH_REPO_ARGS+=(--repo "$repo")
+done
+if ! OPEN_PRS=$(gh search prs --review-requested @me --state open "${SEARCH_REPO_ARGS[@]}" \
+    --json number,repository --jq '.[] | "\(.repository.nameWithOwner) \(.number)"' 2>> "$LOG_FILE"); then
+  echo "=== Run finished: $(date), couldn't list PRs from GitHub, trying again next run ===" >> "$LOG_FILE"
+  exit 0
+fi
+NEEDS_REVIEW=()
+CHECKED=0
+while read -r repo number; do
+  [[ -z "$repo" ]] && continue
+  CHECKED=$((CHECKED + 1))
+  if ! head_sha=$(gh pr view "$number" --repo "$repo" --json headRefOid -q .headRefOid 2>> "$LOG_FILE"); then
+    echo "couldn't read the head commit of $repo#$number, checking it again next run" >> "$LOG_FILE"
+    continue
+  fi
+  reviewed_sha=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], ""))' \
+    "$SCRIPT_DIR/state.json" "$repo#$number" 2>/dev/null || true)
+  if [[ "$head_sha" != "$reviewed_sha" ]]; then
+    NEEDS_REVIEW+=("$repo#$number")
+  fi
+done <<< "$OPEN_PRS"
+if [[ ${#NEEDS_REVIEW[@]} -eq 0 ]]; then
+  echo "=== Run finished: $(date), nothing new across $CHECKED open PR(s), Claude not started ===" >> "$LOG_FILE"
+  exit 0
+fi
+echo "New or updated, starting Claude (model=${REVIEW_MODEL:-claude-default}): ${NEEDS_REVIEW[*]}" >> "$LOG_FILE"
 
 touch "$SCRIPT_DIR/RUNNING"
 # A plain trailing `rm -f` only runs if claude exits normally — if it's killed or crashes
@@ -79,7 +113,12 @@ for org in $(repo_orgs); do
   GH_API_TOOLS+=("Bash(gh api repos/$org/*)")
 done
 
-"$CLAUDE_BIN" -p "$PROMPT" \
+MODEL_ARGS=()
+if [[ -n "$REVIEW_MODEL" ]]; then
+  MODEL_ARGS=(--model "$REVIEW_MODEL")
+fi
+
+"$CLAUDE_BIN" -p "$PROMPT" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} \
   --allowedTools "Bash(gh search prs:*)" "Bash(gh pr view:*)" "Bash(gh pr diff:*)" "${GH_API_TOOLS[@]}" "Bash(osascript:*)" "Bash(open vscode://*)" "Read" "Write" "mcp__youtrack__get_issue" "Skill" \
   --permission-prompts none \
   >> "$LOG_FILE" 2>&1

@@ -30,15 +30,18 @@ const REVIEW_ONE_SCRIPT: &str = concat!(env!("PR_TRACKER_BASE_DIR"), "/pr-review
 const REVIEW_LOCAL_SCRIPT: &str =
     concat!(env!("PR_TRACKER_BASE_DIR"), "/pr-review/review-local.sh");
 const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+/// Model aliases `claude --model` accepts; each always points at the latest of its family.
+const MODEL_CHOICES: [&str; 3] = ["fable", "opus", "sonnet"];
+const CONFIG_SH_PATH: &str = concat!(env!("PR_TRACKER_BASE_DIR"), "/pr-review/config.sh");
 /// Wide enough that the table's columns never need a manual drag to appear.
 const BASE_WINDOW_SIZE: [f32; 2] = [980.0, 480.0];
 /// Added to the window height while a row's review-options panel is open, so
 /// it's never hidden below the fold and the window grows back down after.
-const REVIEW_PANEL_EXTRA_HEIGHT: f32 = 260.0;
+const REVIEW_PANEL_EXTRA_HEIGHT: f32 = 205.0;
 /// Same idea for the Publish panel; its comment list scrolls internally past
 /// this, so the extra height stays fixed no matter how many comments a
 /// review produced.
-const PUBLISH_PANEL_EXTRA_HEIGHT: f32 = 320.0;
+const PUBLISH_PANEL_EXTRA_HEIGHT: f32 = 190.0;
 const REPOS_CONF_PATH: &str = concat!(env!("PR_TRACKER_BASE_DIR"), "/pr-review/repos.conf");
 const GH_POLL_INTERVAL: Duration = Duration::from_secs(45);
 const FILE_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -164,6 +167,9 @@ struct ReviewOptions {
     effort: String,
     project_criteria: bool,
     notes: String,
+    /// Empty means "use the base model" — `REVIEW_MODEL` in config.sh, or Claude Code's
+    /// own default if that's empty too. Anything else overrides it for this one run.
+    model: String,
 }
 
 impl Default for ReviewOptions {
@@ -174,6 +180,7 @@ impl Default for ReviewOptions {
             effort: "low".to_string(),
             project_criteria: true,
             notes: String::new(),
+            model: String::new(),
         }
     }
 }
@@ -226,6 +233,13 @@ struct PrTrackerApp {
     /// Repos from repos.conf, reloaded on every `refresh_files` tick (like
     /// status.json) so adding/removing one takes effect without restarting.
     repos: Vec<String>,
+    /// Which open panel has already been scrolled into view. The panel opens below the
+    /// list, so with more than a few rows it would otherwise appear off-screen; this
+    /// scrolls to it once when it opens without fighting the user's own scrolling after.
+    panel_in_view: Option<String>,
+    /// `REVIEW_MODEL` from config.sh, shown as the "Default" model choice so it's clear
+    /// what a review will run on without opening the file.
+    base_model: String,
 }
 
 impl PrTrackerApp {
@@ -249,6 +263,8 @@ impl PrTrackerApp {
             status_message_key: None,
             last_extra_height: 0.0,
             repos: Vec::new(),
+            panel_in_view: None,
+            base_model: String::new(),
         };
         app.refresh_files();
         app
@@ -256,6 +272,7 @@ impl PrTrackerApp {
 
     fn refresh_files(&mut self) {
         self.repos = load_repos();
+        self.base_model = configured_review_model();
         // Keep the dropdown pointed at a real repo once one loads — matters on first
         // launch, when `new()` had nothing to default it to yet, and again if the
         // previously-selected repo gets removed from repos.conf out from under it.
@@ -407,6 +424,8 @@ fn spawn_review(key: &str, opts: &ReviewOptions) -> Result<(), String> {
             bool_str(opts.project_criteria),
             "--notes",
             &opts.notes,
+            "--model",
+            &opts.model,
         ])
         .spawn()
         .map(|_| ())
@@ -436,6 +455,8 @@ fn spawn_local_review(key: &str, opts: &ReviewOptions) -> Result<(), String> {
             bool_str(opts.project_criteria),
             "--notes",
             &opts.notes,
+            "--model",
+            &opts.model,
         ])
         .spawn()
         .map(|_| ())
@@ -485,6 +506,49 @@ fn load_repos() -> Vec<String> {
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .filter_map(|line| line.split_once(':').map(|(repo, _)| repo.trim().to_string()))
         .collect()
+}
+
+/// Reads `REVIEW_MODEL="..."` out of config.sh — the scripts themselves are what actually
+/// apply it. The last uncommented assignment wins, as it would in bash.
+fn configured_review_model() -> String {
+    std::fs::read_to_string(CONFIG_SH_PATH)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("REVIEW_MODEL="))
+        .map(|value| value.trim().trim_matches(|c| c == '"' || c == '\'').to_string())
+        .last()
+        .unwrap_or_default()
+}
+
+/// Saves the base model to config.sh, replacing the same `REVIEW_MODEL=` line
+/// `configured_review_model` reads (or adding one) and leaving the rest of the file as is.
+/// config.sh is sourced by bash, so only plain model names are accepted, and the file is
+/// swapped in whole so a review starting at that moment never reads it half-written.
+fn save_review_model(model: &str) -> Result<(), String> {
+    if !model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+        return Err(format!("not a valid model name: {model}"));
+    }
+    let text = std::fs::read_to_string(CONFIG_SH_PATH)
+        .map_err(|e| format!("couldn't read pr-review/config.sh: {e}"))?;
+    let new_line = format!("REVIEW_MODEL=\"{model}\"");
+    let mut lines: Vec<String> = text.lines().map(str::to_string).collect();
+    match lines
+        .iter()
+        .rposition(|line| line.trim_start().starts_with("REVIEW_MODEL="))
+    {
+        Some(index) => lines[index] = new_line,
+        None => {
+            lines.push(String::new());
+            lines.push("# Base model for every review (see config.sh.example).".to_string());
+            lines.push(new_line);
+        }
+    }
+    let temp_path = format!("{CONFIG_SH_PATH}.tmp");
+    std::fs::write(&temp_path, lines.join("\n") + "\n")
+        .map_err(|e| format!("couldn't save pr-review/config.sh: {e}"))?;
+    std::fs::rename(&temp_path, CONFIG_SH_PATH)
+        .map_err(|e| format!("couldn't save pr-review/config.sh: {e}"))
 }
 
 fn load_json_map(path: &str) -> HashMap<String, String> {
@@ -669,42 +733,65 @@ fn stage_color(stage: &str) -> egui::Color32 {
 
 struct Palette {
     background: egui::Color32,
-    hyperlink: egui::Color32,
+    text: egui::Color32,
+    muted_text: egui::Color32,
+    accent: egui::Color32,
     selection: egui::Color32,
-    noninteractive_bg: egui::Color32,
     inactive_bg: egui::Color32,
     hovered_bg: egui::Color32,
     active_bg: egui::Color32,
+    control_border: egui::Color32,
+    field_bg: egui::Color32,
     card_bg: egui::Color32,
     card_border: egui::Color32,
-    muted_text: egui::Color32,
+    row_hover: egui::Color32,
 }
 
+// Colours follow macOS's own system palette (window background, grouped-list cards,
+// system blue accent) so the app sits naturally next to native windows in both themes.
 const DARK: Palette = Palette {
-    background: egui::Color32::from_rgb(24, 25, 29),
-    hyperlink: egui::Color32::from_rgb(120, 170, 255),
-    selection: egui::Color32::from_rgb(70, 100, 160),
-    noninteractive_bg: egui::Color32::from_rgb(30, 31, 36),
-    inactive_bg: egui::Color32::from_rgb(40, 42, 48),
-    hovered_bg: egui::Color32::from_rgb(55, 58, 66),
-    active_bg: egui::Color32::from_rgb(70, 74, 84),
-    card_bg: egui::Color32::from_rgb(32, 33, 39),
-    card_border: egui::Color32::from_rgb(46, 48, 55),
-    muted_text: egui::Color32::from_rgb(150, 153, 163),
+    background: egui::Color32::from_rgb(28, 28, 30),
+    text: egui::Color32::from_rgb(236, 236, 240),
+    muted_text: egui::Color32::from_rgb(152, 152, 160),
+    accent: egui::Color32::from_rgb(10, 132, 255),
+    selection: egui::Color32::from_rgb(38, 82, 140),
+    inactive_bg: egui::Color32::from_rgb(58, 58, 62),
+    hovered_bg: egui::Color32::from_rgb(70, 70, 75),
+    active_bg: egui::Color32::from_rgb(84, 84, 90),
+    control_border: egui::Color32::from_rgb(66, 66, 71),
+    field_bg: egui::Color32::from_rgb(30, 30, 33),
+    card_bg: egui::Color32::from_rgb(40, 40, 43),
+    card_border: egui::Color32::from_rgb(54, 54, 58),
+    row_hover: egui::Color32::from_rgb(50, 50, 54),
 };
 
 const LIGHT: Palette = Palette {
-    background: egui::Color32::from_rgb(248, 248, 250),
-    hyperlink: egui::Color32::from_rgb(10, 90, 220),
-    selection: egui::Color32::from_rgb(195, 215, 245),
-    noninteractive_bg: egui::Color32::from_rgb(241, 241, 244),
-    inactive_bg: egui::Color32::from_rgb(230, 231, 235),
-    hovered_bg: egui::Color32::from_rgb(219, 221, 227),
-    active_bg: egui::Color32::from_rgb(205, 208, 216),
+    background: egui::Color32::from_rgb(242, 242, 247),
+    text: egui::Color32::from_rgb(29, 29, 31),
+    muted_text: egui::Color32::from_rgb(110, 110, 118),
+    accent: egui::Color32::from_rgb(0, 122, 255),
+    selection: egui::Color32::from_rgb(190, 215, 250),
+    inactive_bg: egui::Color32::from_rgb(232, 232, 237),
+    hovered_bg: egui::Color32::from_rgb(220, 220, 226),
+    active_bg: egui::Color32::from_rgb(205, 205, 212),
+    control_border: egui::Color32::from_rgb(208, 208, 214),
+    field_bg: egui::Color32::from_rgb(255, 255, 255),
     card_bg: egui::Color32::from_rgb(255, 255, 255),
-    card_border: egui::Color32::from_rgb(227, 228, 232),
-    muted_text: egui::Color32::from_rgb(120, 122, 130),
+    card_border: egui::Color32::from_rgb(226, 226, 231),
+    row_hover: egui::Color32::from_rgb(242, 242, 246),
 };
+
+/// Height every input, dropdown and button in the "New review" form shares, so labels,
+/// fields and buttons all sit on one centre line.
+const CONTROL_HEIGHT: f32 = 28.0;
+const FORM_LABEL_WIDTH: f32 = 112.0;
+const FORM_BUTTON_WIDTH: f32 = 92.0;
+const REPO_PICKER_WIDTH: f32 = 128.0;
+const ROW_BUTTON_SIZE: [f32; 2] = [74.0, 24.0];
+const ROW_HEIGHT: f32 = 38.0;
+/// Space reserved for the outcome/stage pill whether or not a row has one, so the pills
+/// and the action buttons after them line up in the same columns on every row.
+const PILL_SLOT_WIDTH: f32 = 124.0;
 
 fn palette(ui: &egui::Ui) -> &'static Palette {
     if ui.visuals().dark_mode {
@@ -727,15 +814,104 @@ fn outcome_color(outcome: &str) -> egui::Color32 {
     }
 }
 
-fn outcome_pill(ui: &mut egui::Ui, outcome: &str) {
-    let color = outcome_color(outcome);
+fn outcome_label(outcome: &str) -> &str {
+    match outcome {
+        "approve" => "Approve",
+        "request-changes" => "Request changes",
+        "needs-discussion" => "Needs discussion",
+        other => other,
+    }
+}
+
+/// Draws a tinted pill right-aligned inside a fixed-width slot (see `PILL_SLOT_WIDTH`).
+fn pill(ui: &mut egui::Ui, color: egui::Color32, text: &str) {
+    let (slot, _) =
+        ui.allocate_exact_size(egui::vec2(PILL_SLOT_WIDTH, 20.0), egui::Sense::hover());
+    // The status colours are tuned for dark mode; on a light background the same pastel
+    // text is hard to read, so it's darkened there (the tinted fill stays as is).
+    let text_color = if ui.visuals().dark_mode {
+        color
+    } else {
+        color.lerp_to_gamma(egui::Color32::BLACK, 0.35)
+    };
+    let galley = ui.painter().layout_no_wrap(
+        text.to_string(),
+        egui::FontId::proportional(11.5),
+        text_color,
+    );
+    let size = egui::vec2(galley.size().x + 18.0, 20.0);
+    let rect = egui::Rect::from_min_size(
+        egui::pos2(slot.right() - size.x, slot.center().y - size.y / 2.0),
+        size,
+    );
+    ui.painter()
+        .rect_filled(rect, egui::CornerRadius::same(255), color.gamma_multiply(0.16));
+    ui.painter()
+        .galley(rect.center() - galley.size() / 2.0, galley, text_color);
+}
+
+/// The rounded container used for the form, the review list and both panels — the same
+/// grouped-list look as macOS System Settings.
+fn card<R>(
+    ui: &mut egui::Ui,
+    inner_margin: impl Into<egui::Margin>,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let pal = palette(ui);
     egui::Frame::new()
-        .fill(color.gamma_multiply(0.18))
-        .corner_radius(egui::CornerRadius::same(255))
-        .inner_margin(egui::Margin::symmetric(8, 2))
+        .fill(pal.card_bg)
+        .stroke(egui::Stroke::new(1.0, pal.card_border))
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(inner_margin)
         .show(ui, |ui| {
-            ui.colored_label(color, outcome);
+            ui.set_width(ui.available_width());
+            add_contents(ui)
+        })
+        .inner
+}
+
+fn banner(ui: &mut egui::Ui, color: egui::Color32, text: impl Into<egui::RichText>) {
+    egui::Frame::new()
+        .fill(color.gamma_multiply(0.12))
+        .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.35)))
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.colored_label(color, text);
         });
+}
+
+fn status_dot(ui: &mut egui::Ui, color: egui::Color32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 4.0, color);
+    response
+}
+
+fn section_title(ui: &mut egui::Ui, text: &str) {
+    let pal = palette(ui);
+    ui.label(
+        egui::RichText::new(text.to_uppercase())
+            .size(11.0)
+            .strong()
+            .color(pal.muted_text),
+    );
+}
+
+/// The blue, filled default-action button macOS uses — only filled while it can actually
+/// be clicked, so a disabled one doesn't read as the thing to press.
+fn primary_button(ui: &egui::Ui, text: &str, enabled: bool) -> egui::Button<'static> {
+    if enabled {
+        egui::Button::new(egui::RichText::new(text).color(egui::Color32::WHITE))
+            .fill(palette(ui).accent)
+            .stroke(egui::Stroke::NONE)
+    } else {
+        egui::Button::new(text.to_string())
+    }
+}
+
+fn row_button(text: &str) -> egui::Button<'static> {
+    egui::Button::new(egui::RichText::new(text).size(12.0))
 }
 
 /// Styles both the Dark and Light egui themes and leaves `Context`'s theme
@@ -753,30 +929,47 @@ fn apply_style(ctx: &egui::Context) {
             style.visuals = base_visuals;
             let visuals = &mut style.visuals;
             visuals.panel_fill = palette.background;
-            visuals.window_fill = palette.background;
-            visuals.widgets.noninteractive.bg_fill = palette.noninteractive_bg;
-            visuals.widgets.inactive.bg_fill = palette.inactive_bg;
-            visuals.widgets.hovered.bg_fill = palette.hovered_bg;
-            visuals.widgets.active.bg_fill = palette.active_bg;
-            visuals.hyperlink_color = palette.hyperlink;
+            visuals.window_fill = palette.card_bg;
+            visuals.extreme_bg_color = palette.field_bg;
+            visuals.hyperlink_color = palette.accent;
             visuals.selection.bg_fill = palette.selection;
+            visuals.selection.stroke = egui::Stroke::new(1.0, palette.accent);
+            visuals.widgets.noninteractive.bg_fill = palette.card_bg;
+            visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, palette.text);
+            visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, palette.card_border);
+            for (widget, fill) in [
+                (&mut visuals.widgets.inactive, palette.inactive_bg),
+                (&mut visuals.widgets.hovered, palette.hovered_bg),
+                (&mut visuals.widgets.active, palette.active_bg),
+                (&mut visuals.widgets.open, palette.hovered_bg),
+            ] {
+                widget.bg_fill = fill;
+                widget.weak_bg_fill = fill;
+                widget.fg_stroke = egui::Stroke::new(1.0, palette.text);
+                widget.bg_stroke = egui::Stroke::new(1.0, palette.control_border);
+                widget.expansion = 0.0;
+            }
             for corner_radius in [
                 &mut visuals.widgets.noninteractive.corner_radius,
                 &mut visuals.widgets.inactive.corner_radius,
                 &mut visuals.widgets.hovered.corner_radius,
                 &mut visuals.widgets.active.corner_radius,
+                &mut visuals.widgets.open.corner_radius,
             ] {
                 *corner_radius = egui::CornerRadius::same(6);
             }
 
-            style.spacing.item_spacing = egui::vec2(10.0, 10.0);
-            style.spacing.button_padding = egui::vec2(10.0, 5.0);
+            style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+            style.spacing.button_padding = egui::vec2(10.0, 4.0);
+            style.spacing.interact_size.y = 24.0;
+            // macOS's own sizes: 13pt body text, 11pt captions.
             for (text_style, font_id) in style.text_styles.iter_mut() {
                 font_id.size = match text_style {
-                    egui::TextStyle::Heading => 22.0,
-                    egui::TextStyle::Body => 15.0,
-                    egui::TextStyle::Button => 14.0,
-                    egui::TextStyle::Small => 12.0,
+                    egui::TextStyle::Heading => 20.0,
+                    egui::TextStyle::Body => 13.0,
+                    egui::TextStyle::Button => 13.0,
+                    egui::TextStyle::Small => 11.0,
+                    egui::TextStyle::Monospace => 12.0,
                     _ => font_id.size,
                 };
             }
@@ -907,94 +1100,249 @@ impl eframe::App for PrTrackerApp {
         }
         let ctx = ui.ctx().clone();
 
-        egui::CentralPanel::default().show(ui, |ui| {
+        let pal = palette(ui);
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::central_panel(ui.style())
+                    .fill(pal.background)
+                    .inner_margin(egui::Margin::symmetric(20, 16)),
+            )
+            .show(ui, |ui| {
             // Belt-and-suspenders: the window itself grows to fit the review panel (see
             // the resize below), but this keeps everything reachable even if a very long
             // title or a tall notes field ever pushes past that extra height.
             egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-            ui.heading("PR Review Tracker");
             ui.horizontal(|ui| {
-                ui.label(if self.running {
-                    "automation: reviewing now"
-                } else {
-                    "automation: idle"
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 2.0;
+                    ui.label(egui::RichText::new("PR Review Tracker").size(20.0).strong());
+                    let watching = if self.repos.is_empty() {
+                        "No repos configured".to_string()
+                    } else {
+                        format!(
+                            "Watching {}",
+                            self.repos.iter().map(|r| short_repo(r)).collect::<Vec<_>>().join(", ")
+                        )
+                    };
+                    ui.label(egui::RichText::new(watching).color(pal.muted_text));
                 });
-                let shared = self.shared.lock().unwrap();
-                // A dot instead of a ticking "Ns ago" counter: its color only changes at
-                // the fresh/stale threshold, not every second, so it doesn't read as a
-                // running timer. Exact freshness is still there on hover for anyone who
-                // wants it.
-                let (color, tooltip) = match shared.last_fetched {
-                    Some(t) if t.elapsed() < GH_POLL_INTERVAL * 2 => (
-                        egui::Color32::from_rgb(98, 209, 150),
-                        format!("gh refreshed {}s ago", t.elapsed().as_secs()),
-                    ),
-                    Some(t) => (
-                        egui::Color32::from_rgb(240, 180, 80),
-                        format!("gh hasn't refreshed in {}s, might be stuck", t.elapsed().as_secs()),
-                    ),
-                    None => (
-                        egui::Color32::from_rgb(150, 160, 180),
-                        "gh hasn't refreshed yet".to_string(),
-                    ),
-                };
-                ui.colored_label(color, "●").on_hover_text(tooltip);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let shared = self.shared.lock().unwrap();
+                    // The dot's colour only changes at the fresh/stale threshold rather
+                    // than ticking every second, so it doesn't read as a running timer.
+                    // Exact freshness is still there on hover for anyone who wants it.
+                    let (color, tooltip) = match shared.last_fetched {
+                        Some(t) if t.elapsed() < GH_POLL_INTERVAL * 2 => (
+                            egui::Color32::from_rgb(98, 209, 150),
+                            format!("GitHub refreshed {}s ago", t.elapsed().as_secs()),
+                        ),
+                        Some(t) => (
+                            egui::Color32::from_rgb(240, 180, 80),
+                            format!(
+                                "GitHub hasn't refreshed in {}s, might be stuck",
+                                t.elapsed().as_secs()
+                            ),
+                        ),
+                        None => (
+                            egui::Color32::from_rgb(150, 160, 180),
+                            "GitHub hasn't refreshed yet".to_string(),
+                        ),
+                    };
+                    drop(shared);
+                    egui::Frame::new()
+                        .fill(pal.card_bg)
+                        .stroke(egui::Stroke::new(1.0, pal.card_border))
+                        .corner_radius(egui::CornerRadius::same(255))
+                        .inner_margin(egui::Margin::symmetric(12, 5))
+                        .show(ui, |ui| {
+                            // Inherits the header's right-to-left direction, so the label is
+                            // added first to end up on the right of the dot.
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 7.0;
+                                ui.label(if self.running { "Reviewing" } else { "Idle" });
+                                status_dot(ui, color);
+                            });
+                        })
+                        .response
+                        .on_hover_text(tooltip);
+
+                    ui.add_space(8.0);
+                    // Right-to-left here, so the dropdown is added before its label.
+                    let config_exists = std::path::Path::new(CONFIG_SH_PATH).exists();
+                    let shown = |model: &str| {
+                        if model.is_empty() {
+                            "Claude Code default".to_string()
+                        } else {
+                            model.to_string()
+                        }
+                    };
+                    let mut choice = self.base_model.clone();
+                    let picker = ui
+                        .add_enabled_ui(config_exists, |ui| {
+                            ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
+                            egui::ComboBox::from_id_salt("default_review_model")
+                                .width(150.0)
+                                .selected_text(shown(&choice))
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut choice, String::new(), shown(""));
+                                    for model in MODEL_CHOICES {
+                                        ui.selectable_value(&mut choice, model.to_string(), model);
+                                    }
+                                    // A full model name typed into config.sh by hand stays
+                                    // selectable instead of silently disappearing from the list.
+                                    if !self.base_model.is_empty()
+                                        && !MODEL_CHOICES.contains(&self.base_model.as_str())
+                                    {
+                                        ui.selectable_value(
+                                            &mut choice,
+                                            self.base_model.clone(),
+                                            self.base_model.as_str(),
+                                        );
+                                    }
+                                })
+                                .response
+                        })
+                        .inner;
+                    picker.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::Role::ComboBox, config_exists, "Default model")
+                    });
+                    picker.on_hover_text(if config_exists {
+                        "Model for automatic reviews, and the default in each Review… panel. \
+                         Saved to pr-review/config.sh as REVIEW_MODEL."
+                    } else {
+                        "Copy pr-review/config.sh.example to pr-review/config.sh first."
+                    });
+                    ui.label(egui::RichText::new("Default model").color(pal.muted_text));
+                    if choice != self.base_model {
+                        match save_review_model(&choice) {
+                            Ok(()) => self.base_model = choice,
+                            Err(e) => {
+                                self.status_message = Some(e);
+                                self.status_message_key = None;
+                            }
+                        }
+                    }
+                });
             });
+            ui.add_space(12.0);
+
             if let Some(msg) = &self.status_message {
-                ui.colored_label(egui::Color32::from_rgb(120, 170, 255), msg);
+                banner(ui, pal.accent, msg);
+                ui.add_space(4.0);
             }
             if self.repos.is_empty() {
-                ui.colored_label(
-                    egui::Color32::RED,
-                    "no repos configured — copy pr-review/repos.conf.example to \
-                     pr-review/repos.conf and list the repos you want reviewed",
+                banner(
+                    ui,
+                    egui::Color32::from_rgb(235, 100, 100),
+                    "No repos configured — copy pr-review/repos.conf.example to \
+                     pr-review/repos.conf and list the repos you want reviewed.",
                 );
+                ui.add_space(4.0);
             }
-            ui.horizontal(|ui| {
-                ui.label("Review a PR by URL:");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.adhoc_url)
-                        .desired_width(340.0)
-                        .hint_text(format!(
-                            "https://github.com/{}/pull/1234",
-                            self.repos.first().map(String::as_str).unwrap_or("owner/repo")
-                        )),
-                );
-                // Only enabled once the field actually parses to a PR URL on a
-                // supported repo, so a stray click on an empty/placeholder field
-                // can't fire a confusing "couldn't find a PR URL" message.
-                let valid = parse_pr_url(&self.adhoc_url)
-                    .is_some_and(|(repo, _)| self.repos.contains(&repo));
-                if ui
-                    .add_enabled(valid, egui::Button::new("Review…"))
-                    .clicked()
-                {
-                    self.submit_adhoc_url();
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Review a local branch:");
-                egui::ComboBox::from_id_salt("local_branch_repo")
-                    .selected_text(short_repo(&self.local_branch_repo))
-                    .show_ui(ui, |ui| {
-                        for repo in &self.repos {
-                            ui.selectable_value(&mut self.local_branch_repo, repo.clone(), short_repo(repo));
+
+            section_title(ui, "New review");
+            card(ui, egui::Margin::symmetric(16, 12), |ui| {
+                ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
+                let gap = 10.0;
+                let field_width =
+                    ui.available_width() - FORM_LABEL_WIDTH - FORM_BUTTON_WIDTH - 2.0 * gap;
+                egui::Grid::new("new_review_form")
+                    .num_columns(3)
+                    .spacing([gap, 10.0])
+                    .min_row_height(CONTROL_HEIGHT)
+                    .show(ui, |ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(FORM_LABEL_WIDTH, CONTROL_HEIGHT),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.set_min_size(egui::vec2(FORM_LABEL_WIDTH, CONTROL_HEIGHT));
+                                ui.label("Pull request");
+                            },
+                        );
+                        ui.add_sized(
+                            [field_width, CONTROL_HEIGHT],
+                            egui::TextEdit::singleline(&mut self.adhoc_url)
+                                .margin(egui::Margin::symmetric(8, 0))
+                                .align(egui::Align2::LEFT_CENTER)
+                                .hint_text(format!(
+                                    "https://github.com/{}/pull/1234",
+                                    self.repos.first().map(String::as_str).unwrap_or("owner/repo")
+                                )),
+                        );
+                        // Only enabled once the field actually parses to a PR URL on a
+                        // supported repo, so a stray click on an empty/placeholder field
+                        // can't fire a confusing "couldn't find a PR URL" message.
+                        let valid = parse_pr_url(&self.adhoc_url)
+                            .is_some_and(|(repo, _)| self.repos.contains(&repo));
+                        let button = primary_button(ui, "Review…", valid);
+                        if ui
+                            .add_enabled_ui(valid, |ui| {
+                                ui.add_sized([FORM_BUTTON_WIDTH, CONTROL_HEIGHT], button)
+                            })
+                            .inner
+                            .clicked()
+                        {
+                            self.submit_adhoc_url();
                         }
+                        ui.end_row();
+
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(FORM_LABEL_WIDTH, CONTROL_HEIGHT),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |ui| {
+                                ui.set_min_size(egui::vec2(FORM_LABEL_WIDTH, CONTROL_HEIGHT));
+                                ui.label("Local branch");
+                            },
+                        );
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 8.0;
+                            let picker = egui::ComboBox::from_id_salt("local_branch_repo")
+                                .width(REPO_PICKER_WIDTH)
+                                .selected_text(short_repo(&self.local_branch_repo))
+                                .show_ui(ui, |ui| {
+                                    for repo in &self.repos {
+                                        ui.selectable_value(
+                                            &mut self.local_branch_repo,
+                                            repo.clone(),
+                                            short_repo(repo),
+                                        );
+                                    }
+                                });
+                            picker.response.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::Role::ComboBox,
+                                    true,
+                                    "Repository",
+                                )
+                            });
+                            // Sized off the picker's real width so this row ends exactly where
+                            // the URL field above does.
+                            let rest = field_width
+                                - picker.response.rect.width()
+                                - ui.spacing().item_spacing.x;
+                            ui.add_sized(
+                                [rest, CONTROL_HEIGHT],
+                                egui::TextEdit::singleline(&mut self.local_branch_name)
+                                    .margin(egui::Margin::symmetric(8, 0))
+                                    .align(egui::Align2::LEFT_CENTER)
+                                    .hint_text("feature/my-branch"),
+                            );
+                        });
+                        let valid = !self.local_branch_name.trim().is_empty();
+                        let button = primary_button(ui, "Review…", valid);
+                        if ui
+                            .add_enabled_ui(valid, |ui| {
+                                ui.add_sized([FORM_BUTTON_WIDTH, CONTROL_HEIGHT], button)
+                            })
+                            .inner
+                            .clicked()
+                        {
+                            self.submit_local_branch();
+                        }
+                        ui.end_row();
                     });
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.local_branch_name)
-                        .desired_width(260.0)
-                        .hint_text("DEV-19297-variants-license"),
-                );
-                let valid = !self.local_branch_name.trim().is_empty();
-                if ui
-                    .add_enabled(valid, egui::Button::new("Review…"))
-                    .clicked()
-                {
-                    self.submit_local_branch();
-                }
             });
-            ui.separator();
+            ui.add_space(16.0);
 
             let shared = self.shared.lock().unwrap();
             let gh_error = shared.error.clone();
@@ -1076,12 +1424,33 @@ impl eframe::App for PrTrackerApp {
             self.pending_local.retain(|k| !seen.contains(k));
 
             if let Some(err) = &gh_error {
-                ui.colored_label(egui::Color32::RED, format!("gh error: {err}"));
-                ui.separator();
+                banner(ui, egui::Color32::from_rgb(235, 100, 100), format!("GitHub error: {err}"));
+                ui.add_space(8.0);
             }
 
+            ui.horizontal(|ui| {
+                section_title(ui, "Reviews");
+                if !rows.is_empty() {
+                    ui.label(
+                        egui::RichText::new(rows.len().to_string())
+                            .size(11.0)
+                            .color(pal.muted_text),
+                    );
+                }
+            });
+
             if rows.is_empty() && gh_error.is_none() {
-                ui.label("no assigned, in-progress, or completed reviews right now");
+                card(ui, egui::Margin::symmetric(16, 28), |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.label(egui::RichText::new("Nothing to review right now").strong());
+                        ui.label(
+                            egui::RichText::new(
+                                "PRs that request your review show up here automatically.",
+                            )
+                            .color(pal.muted_text),
+                        );
+                    });
+                });
                 return;
             }
 
@@ -1090,88 +1459,139 @@ impl eframe::App for PrTrackerApp {
             let mut clicked_remove: Option<String> = None;
             let mut clicked_publish: Option<(String, String)> = None;
 
-            let pal = palette(ui);
-            for row in &rows {
-                let card_id = ui.make_persistent_id(("pr_card", &row.key));
-                let hovered = ui.ctx().data(|d| d.get_temp::<bool>(card_id)).unwrap_or(false);
-                let bg_t = ui.ctx().animate_bool_with_time(card_id, hovered, 0.12);
-                let bg = pal.card_bg.lerp_to_gamma(pal.hovered_bg, bg_t * 0.5);
-
-                let frame_response = egui::Frame::new()
-                    .fill(bg)
-                    .stroke(egui::Stroke::new(1.0, pal.card_border))
-                    .corner_radius(egui::CornerRadius::same(10))
-                    .inner_margin(egui::Margin::symmetric(14, 10))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.colored_label(stage_color(row.stage), "●");
-                            if ui.link(&row.label).clicked() {
-                                open_url(&row.pr_url);
-                            }
-                            // Capped width so a long title can't push the outcome pill off
-                            // the right edge of the window; full text on hover.
-                            ui.scope(|ui| {
-                                ui.set_max_width(380.0);
-                                ui.add(egui::Label::new(&row.title).truncate())
-                                    .on_hover_text(&row.title);
-                            });
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if let Some(outcome) = &row.outcome {
-                                    outcome_pill(ui, outcome);
-                                }
-                            });
-                        });
-                        ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            ui.colored_label(pal.muted_text, row.stage);
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            card(ui, egui::Margin::same(4), |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                for (index, row) in rows.iter().enumerate() {
+                    if index > 0 {
+                        let rect = ui.available_rect_before_wrap();
+                        ui.painter().hline(
+                            (rect.left() + 32.0)..=(rect.right() - 12.0),
+                            ui.cursor().top(),
+                            egui::Stroke::new(1.0, pal.card_border),
+                        );
+                    }
+                    // Painted behind the row once its size is known, so the hover highlight
+                    // can follow the row exactly without a frame of lag.
+                    let hover_bg = ui.painter().add(egui::Shape::Noop);
+                    let response = egui::Frame::new()
+                        .inner_margin(egui::Margin::symmetric(12, 9))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            // A fixed height matters: a centred layout given the window's
+                            // remaining height centres the row against all of it.
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(ui.available_width(), ROW_HEIGHT),
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                let skip_slot = ROW_BUTTON_SIZE[0] + ui.spacing().item_spacing.x;
                                 let reviewed = !row.action_label.is_empty();
                                 let removable = reviewed || cancelable.contains(&row.key);
-                                if removable
-                                    && ui
-                                        .button("Remove")
+                                // Every action keeps its own column — an absent one leaves a gap
+                                // instead of shifting the rest, so buttons line up down the list.
+                                if removable {
+                                    if ui
+                                        .add_sized(ROW_BUTTON_SIZE, row_button("Remove"))
                                         .on_hover_text(if reviewed {
                                             "Delete this report — comes back if new commits are pushed to this PR"
                                         } else {
                                             "Cancel — this hasn't been reviewed yet"
                                         })
                                         .clicked()
-                                {
-                                    clicked_remove = Some(row.key.clone());
+                                    {
+                                        clicked_remove = Some(row.key.clone());
+                                    }
+                                } else {
+                                    ui.add_space(skip_slot);
                                 }
                                 // A local branch has no PR yet, so there's nothing to attach a
                                 // GitHub review to.
-                                if reviewed
-                                    && is_pr_key(&row.key)
-                                    && ui
-                                        .button("Publish…")
+                                if reviewed && is_pr_key(&row.key) {
+                                    if ui
+                                        .add_sized(ROW_BUTTON_SIZE, row_button("Publish…"))
                                         .on_hover_text(
                                             "Draft these comments as a pending GitHub review",
                                         )
                                         .clicked()
-                                {
-                                    clicked_publish =
-                                        Some((row.key.clone(), row.action_target.clone()));
+                                    {
+                                        clicked_publish =
+                                            Some((row.key.clone(), row.action_target.clone()));
+                                    }
+                                } else {
+                                    ui.add_space(skip_slot);
                                 }
-                                if ui.button("Review…").clicked() {
+                                if ui.add_sized(ROW_BUTTON_SIZE, row_button("Review…")).clicked() {
                                     clicked_configure = Some(row.key.clone());
                                 }
-                                if reviewed && ui.button(row.action_label).clicked() {
-                                    clicked_report = Some(row.action_target.clone());
+                                if reviewed {
+                                    if ui
+                                        .add_sized(ROW_BUTTON_SIZE, row_button(row.action_label))
+                                        .clicked()
+                                    {
+                                        clicked_report = Some(row.action_target.clone());
+                                    }
+                                } else {
+                                    ui.add_space(skip_slot);
                                 }
+                                ui.add_space(6.0);
+                                match (&row.outcome, row.stage) {
+                                    (_, "Reviewing") => pill(ui, stage_color("Reviewing"), "Reviewing…"),
+                                    (Some(outcome), _) => {
+                                        pill(ui, outcome_color(outcome), outcome_label(outcome))
+                                    }
+                                    (None, stage) => pill(ui, stage_color(stage), stage),
+                                }
+                                ui.with_layout(
+                                    egui::Layout::left_to_right(egui::Align::Center),
+                                    |ui| {
+                                        ui.spacing_mut().item_spacing.x = 10.0;
+                                        status_dot(ui, stage_color(row.stage));
+                                        ui.vertical(|ui| {
+                                            ui.spacing_mut().item_spacing.y = 2.0;
+                                            ui.add(
+                                                egui::Label::new(
+                                                    egui::RichText::new(&row.title).strong(),
+                                                )
+                                                .truncate(),
+                                            )
+                                            .on_hover_text(&row.title);
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = 4.0;
+                                                if ui
+                                                    .link(egui::RichText::new(&row.label).size(12.0))
+                                                    .on_hover_text(&row.pr_url)
+                                                    .clicked()
+                                                {
+                                                    open_url(&row.pr_url);
+                                                }
+                                                ui.label(
+                                                    egui::RichText::new(format!("· {}", row.stage))
+                                                        .size(12.0)
+                                                        .color(pal.muted_text),
+                                                );
+                                            });
+                                        });
+                                    },
+                                );
                             });
-                        });
-                    })
-                    .response;
+                        })
+                        .response;
 
-                let now_hovered = frame_response.hovered();
-                if now_hovered != hovered {
-                    ui.ctx()
-                        .data_mut(|d| d.insert_temp(card_id, now_hovered));
-                    ui.ctx().request_repaint();
+                    let row_id = ui.make_persistent_id(("pr_row", &row.key));
+                    let hovered = ui.rect_contains_pointer(response.rect);
+                    let t = ui.ctx().animate_bool_with_time(row_id, hovered, 0.12);
+                    if t > 0.0 {
+                        ui.painter().set(
+                            hover_bg,
+                            egui::Shape::rect_filled(
+                                response.rect,
+                                egui::CornerRadius::same(7),
+                                pal.row_hover.gamma_multiply(t),
+                            ),
+                        );
+                    }
                 }
-                ui.add_space(6.0);
-            }
+            });
 
             if let Some(path) = clicked_report {
                 open_report(&path);
@@ -1224,16 +1644,47 @@ impl eframe::App for PrTrackerApp {
                     .map(|r| r.label.clone())
                     .unwrap_or_else(|| key.clone());
 
-                ui.separator();
-                ui.group(|ui| {
-                    ui.strong(format!("Re-review {label}"));
+                ui.add_space(16.0);
+                section_title(ui, "Review options");
+                card(ui, egui::Margin::symmetric(16, 14), |ui| {
+                    ui.label(egui::RichText::new(format!("Re-review {label}")).size(15.0).strong());
+                    ui.add_space(6.0);
+                    let default_model = format!(
+                        "Default ({})",
+                        if self.base_model.is_empty() {
+                            "Claude Code default"
+                        } else {
+                            self.base_model.as_str()
+                        }
+                    );
                     let opts = self.options.entry(key.clone()).or_default();
+                    ui.horizontal(|ui| {
+                        ui.label("Model");
+                        egui::ComboBox::from_id_salt("review_model")
+                            .width(190.0)
+                            .selected_text(if opts.model.is_empty() {
+                                default_model.clone()
+                            } else {
+                                opts.model.clone()
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut opts.model, String::new(), &default_model);
+                                for model in MODEL_CHOICES {
+                                    ui.selectable_value(&mut opts.model, model.to_string(), model);
+                                }
+                            })
+                            .response
+                            .on_hover_text(
+                                "Default is REVIEW_MODEL from pr-review/config.sh. Picking another \
+                                 model here only applies to this one run.",
+                            );
+                    });
                     ui.checkbox(
                         &mut opts.repo_rubric,
                         "Repo rubric — .github/skills/code-review/SKILL.md",
                     );
                     ui.horizontal(|ui| {
-                        ui.checkbox(&mut opts.code_review_skill, "Built-in `code-review` skill");
+                        ui.checkbox(&mut opts.code_review_skill, "Built-in code-review skill, effort");
                         ui.add_enabled_ui(opts.code_review_skill, |ui| {
                             egui::ComboBox::from_id_salt("effort")
                                 .selected_text(&opts.effort)
@@ -1252,12 +1703,24 @@ impl eframe::App for PrTrackerApp {
                         &mut opts.project_criteria,
                         "Project rules — review-criteria.md",
                     );
-                    ui.label("Additional notes for this run (optional):");
-                    ui.text_edit_multiline(&mut opts.notes);
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new("Additional notes for this run (optional)")
+                            .color(pal.muted_text),
+                    );
+                    ui.add(
+                        egui::TextEdit::multiline(&mut opts.notes)
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY)
+                            .margin(egui::Margin::symmetric(8, 6)),
+                    );
+                    ui.add_space(4.0);
 
-                    ui.horizontal(|ui| {
+                    ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), CONTROL_HEIGHT), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
+                        let can_run = !self.running;
                         if ui
-                            .add_enabled(!self.running, egui::Button::new("Run review now"))
+                            .add_enabled(can_run, primary_button(ui, "Run review now", can_run))
                             .clicked()
                         {
                             let spawn_result = if is_pr_key(&key) {
@@ -1288,11 +1751,23 @@ impl eframe::App for PrTrackerApp {
                         if ui.button("Cancel").clicked() {
                             self.configuring = None;
                         }
+                        if self.running {
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "A review is already running — wait for it to finish first.",
+                                    )
+                                    .color(pal.muted_text),
+                                );
+                            });
+                        }
                     });
-                    if self.running {
-                        ui.weak("a review is already in progress, wait for it to finish first");
-                    }
                 });
+                let panel = format!("review:{key}");
+                if self.panel_in_view.as_ref() != Some(&panel) {
+                    ui.scroll_to_cursor(Some(egui::Align::Max));
+                    self.panel_in_view = Some(panel);
+                }
             }
 
             if let Some(key) = self.publishing.clone() {
@@ -1302,63 +1777,94 @@ impl eframe::App for PrTrackerApp {
                     .map(|r| r.label.clone())
                     .unwrap_or_else(|| key.clone());
 
-                ui.separator();
-                ui.group(|ui| {
-                    ui.strong(format!("Publish {label} as a draft GitHub review"));
-                    ui.weak(
-                        "Creates a pending review with these comments placed on GitHub — nothing \
-                         is submitted. You edit, add to, or remove from it and hit Submit yourself \
-                         on GitHub.",
+                ui.add_space(16.0);
+                section_title(ui, "Publish");
+                card(ui, egui::Margin::symmetric(16, 14), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!("Publish {label} as a draft GitHub review"))
+                            .size(15.0)
+                            .strong(),
+                    );
+                    ui.label(
+                        egui::RichText::new(
+                            "Creates a pending review with these comments placed on GitHub — nothing \
+                             is submitted. You edit, add to, or remove from it and hit Submit yourself \
+                             on GitHub.",
+                        )
+                        .color(pal.muted_text),
                     );
 
                     if let Some(draft) = self.publish_drafts.get_mut(&key) {
+                        ui.add_space(4.0);
                         ui.label(&draft.sidecar.summary_line);
+                        ui.add_space(2.0);
 
-                        egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
-                            for (i, comment) in draft.sidecar.comments.iter().enumerate() {
-                                ui.horizontal(|ui| {
-                                    ui.checkbox(&mut draft.include[i], "");
-                                    ui.add_enabled_ui(draft.include[i], |ui| {
-                                        ui.checkbox(&mut draft.inline[i], "inline");
-                                    });
-                                    ui.add(
-                                        egui::Label::new(format!(
-                                            "{}:{} — {}",
-                                            comment.path, comment.line, comment.body
-                                        ))
-                                        .truncate(),
-                                    )
-                                    .on_hover_text(&comment.body);
+                        egui::Frame::new()
+                            .fill(pal.field_bg)
+                            .stroke(egui::Stroke::new(1.0, pal.card_border))
+                            .corner_radius(egui::CornerRadius::same(8))
+                            .inner_margin(egui::Margin::symmetric(10, 6))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                egui::ScrollArea::vertical().max_height(140.0).show(ui, |ui| {
+                                    for (i, comment) in draft.sidecar.comments.iter().enumerate() {
+                                        ui.horizontal(|ui| {
+                                            ui.checkbox(&mut draft.include[i], "")
+                                                .on_hover_text("Include this comment");
+                                            ui.add_enabled_ui(draft.include[i], |ui| {
+                                                ui.checkbox(&mut draft.inline[i], "Inline");
+                                            });
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "{}:{}",
+                                                    comment.path.rsplit('/').next().unwrap_or(&comment.path),
+                                                    comment.line
+                                                ))
+                                                .monospace()
+                                                .color(pal.muted_text),
+                                            )
+                                            .on_hover_text(&comment.path);
+                                            ui.add(egui::Label::new(&comment.body).truncate())
+                                                .on_hover_text(&comment.body);
+                                        });
+                                    }
+                                    if draft.sidecar.comments.is_empty() {
+                                        ui.label(
+                                            egui::RichText::new("No inline comments in this report")
+                                                .color(pal.muted_text),
+                                        );
+                                    }
                                 });
-                            }
-                            if draft.sidecar.comments.is_empty() {
-                                ui.weak("no inline comments in this report");
-                            }
-                        });
+                            });
 
                         if let Some(result) = &draft.result {
+                            ui.add_space(4.0);
                             match result {
-                                Ok(_) => {
-                                    ui.colored_label(
-                                        egui::Color32::from_rgb(98, 209, 150),
-                                        "draft review created, opened in your browser",
-                                    );
-                                }
-                                Err(e) => {
-                                    ui.colored_label(egui::Color32::RED, format!("publish failed: {e}"));
-                                }
+                                Ok(_) => banner(
+                                    ui,
+                                    egui::Color32::from_rgb(98, 209, 150),
+                                    "Draft review created and opened in your browser.",
+                                ),
+                                Err(e) => banner(
+                                    ui,
+                                    egui::Color32::from_rgb(235, 100, 100),
+                                    format!("Publish failed: {e}"),
+                                ),
                             }
                         }
+                        ui.add_space(4.0);
 
-                        ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), CONTROL_HEIGHT), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().interact_size.y = CONTROL_HEIGHT;
                             // Once this succeeds, a second click creates a conflicting second
                             // pending review on GitHub (fails with an unhelpful 422) — stay
                             // disabled for good rather than just while the request is in flight.
                             let already_published = matches!(draft.result, Some(Ok(_)));
+                            let can_publish = !draft.publishing && !already_published;
                             if ui
                                 .add_enabled(
-                                    !draft.publishing && !already_published,
-                                    egui::Button::new("Create draft review"),
+                                    can_publish,
+                                    primary_button(ui, "Create draft review", can_publish),
                                 )
                                 .clicked()
                             {
@@ -1378,6 +1884,14 @@ impl eframe::App for PrTrackerApp {
                         });
                     }
                 });
+                let panel = format!("publish:{key}");
+                if self.panel_in_view.as_ref() != Some(&panel) {
+                    ui.scroll_to_cursor(Some(egui::Align::Max));
+                    self.panel_in_view = Some(panel);
+                }
+            }
+            if self.configuring.is_none() && self.publishing.is_none() {
+                self.panel_in_view = None;
             }
             });
         });

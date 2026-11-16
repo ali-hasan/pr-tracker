@@ -12,6 +12,7 @@ export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$PA
 
 CLAUDE_BIN=""
 REPOS_DIR=""
+REVIEW_MODEL=""
 source "$SCRIPT_DIR/config.sh"
 if [[ -z "$REPOS_DIR" ]]; then
   echo "review-one.sh: REPOS_DIR must be set in $SCRIPT_DIR/config.sh" >&2
@@ -37,6 +38,7 @@ LAYER2=true
 EFFORT="low"
 LAYER3=true
 NOTES=""
+MODEL=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -47,6 +49,7 @@ while [[ $# -gt 0 ]]; do
     --effort) EFFORT="$2"; shift 2 ;;
     --layer3) LAYER3="$2"; shift 2 ;;
     --notes) NOTES="$2"; shift 2 ;;
+    --model) MODEL="$2"; shift 2 ;;
     *) echo "review-one.sh: unknown arg $1" >> "$LOG_FILE"; shift ;;
   esac
 done
@@ -68,7 +71,7 @@ if ! local_path_for_repo "$REPO"; then
 fi
 
 echo "$REPO#$NUMBER" > "$RUNNING_FILE"
-echo "=== Manual review started: $(date), $REPO#$NUMBER (layer1=$LAYER1 layer2=$LAYER2:$EFFORT layer3=$LAYER3 notes=${NOTES:-none}) ===" >> "$LOG_FILE"
+echo "=== Manual review started: $(date), $REPO#$NUMBER (layer1=$LAYER1 layer2=$LAYER2:$EFFORT layer3=$LAYER3 notes=${NOTES:-none} model=${MODEL:-${REVIEW_MODEL:-claude-default}}) ===" >> "$LOG_FILE"
 
 # Built with printf (%s substitution, never shell re-interpreted) so backticks, apostrophes and
 # whatever the user types into --notes can't break quoting or get executed as commands.
@@ -179,7 +182,15 @@ print(text)
 PYEOF
 )
 
-"$CLAUDE_BIN" -p "$PROMPT" \
+# A model picked for this one run in the app wins; otherwise the base model from config.sh;
+# otherwise nothing is passed and Claude Code uses its own default.
+MODEL="${MODEL:-$REVIEW_MODEL}"
+MODEL_ARGS=()
+if [[ -n "$MODEL" ]]; then
+  MODEL_ARGS=(--model "$MODEL")
+fi
+
+"$CLAUDE_BIN" -p "$PROMPT" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} \
   --allowedTools "Bash(gh pr view:*)" "Bash(gh pr diff:*)" "Bash(gh api repos/${REPO%%/*}/*)" "Bash(osascript:*)" "Bash(open vscode://*)" "Read" "Write" "mcp__youtrack__get_issue" "Skill" \
   --permission-prompts none \
   >> "$LOG_FILE" 2>&1

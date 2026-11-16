@@ -39,7 +39,9 @@ PR Tracker.app (launches at login, polls every 45s)
 
 launchd (every 30 min, independent of the app)
   └─ run.sh — same discovery+review logic as above, as a fallback for whenever the
-     tracker app itself isn't running to catch things within 45 seconds.
+     tracker app itself isn't running to catch things within 45 seconds. It checks for
+     new or updated PRs with plain `gh` calls first and only starts Claude when there's
+     something to review, so the usual "nothing new" run costs nothing.
 
 Publish… button (tracker app, user-initiated only)
   └─ gh api POST repos/<owner>/<repo>/pulls/<number>/reviews   (no `event` → stays a draft)
@@ -56,7 +58,7 @@ All state lives in plain JSON files under `pr-review/` — no database, no serve
 | `prompt.md` | you (hand-edited) | `run.sh` | the scheduled-run instruction set |
 | `report-format.md` | you (hand-edited) | every review | shared rules: line verification, link format, voice, report structure, JSON sidecar shape |
 | `review-criteria.md` | you (hand-edited) | every review | layer 3, your own standing rules — empty by default |
-| `config.sh` | you, from `config.sh.example` | `run.sh`, `review-one.sh`, `review-local.sh` | `REPOS_DIR` (required) and an optional `CLAUDE_BIN` override — **not committed** |
+| `config.sh` | you, from `config.sh.example` | `run.sh`, `review-one.sh`, `review-local.sh`, tracker app (display only) | `REPOS_DIR` (required), `REVIEW_MODEL` (base model for reviews) and an optional `CLAUDE_BIN` override — **not committed** |
 | `repos.conf` | you, from `repos.conf.example` | the Rust app, `repos.sh` | which repos to review and their local folder name — **not committed** |
 | `repos.sh` | tracked | `run.sh`, `review-one.sh`, `review-local.sh` | shared loader for `repos.conf` |
 | `run.sh` | tracked | `launchd` | wraps the scheduled `claude -p` call, logs, concurrency guard |
@@ -156,6 +158,13 @@ location explicitly in step 2 below.
    checkouts — e.g. if you have `~/workspace/ops1/api` and `~/workspace/ops1/frontend`, that's
    `~/workspace/ops1`, regardless of where you cloned *this* repo. There's no way to infer this
    one — it has to be set. Leave `CLAUDE_BIN` blank unless auto-detection can't find yours (see §3).
+
+   `REVIEW_MODEL` is the base model every review runs on (`opus` by default; `sonnet` or `fable`
+   also work, as does a full model name). You can also change it from the **Default model**
+   dropdown at the top of the app, which saves it back into this file. Reviews the app or the
+   half-hourly job start on their own always use it. When you start one yourself from the app's **Review…** panel, its **Model**
+   dropdown defaults to this base model, and picking another one there only affects that single
+   run. Each review's model is recorded in `pr-review/run.log`.
 
    Edit `repos.conf` to list the repos you want reviewed, one per line as
    `<owner/repo>:<local-folder-name>` — the folder name is relative to `REPOS_DIR` and doesn't have

@@ -15,3 +15,12 @@ REPOS_DIR="/Users/yourname/workspace/ops1"
 # find yours — e.g. an install in a less common location — or to pin a specific one:
 # CLAUDE_BIN="/Users/yourname/.local/bin/claude"
 CLAUDE_BIN=""
+
+# Base model for every review (also editable from the app's "Default model" dropdown, which
+# rewrites this line): the ones the app and the half-hourly job start on their own,
+# and the "Default" choice in the app's Review options panel (where you can still pick a
+# different model for a single run). Use an alias like "opus", "sonnet" or "fable", which
+# always means the latest of that family, or a full model name. Leave blank to use your
+# Claude Code default. Checking for new PRs never uses a model; Claude only starts when
+# there's something to review.
+REVIEW_MODEL="opus"
