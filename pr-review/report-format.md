@@ -32,7 +32,7 @@ at the exact commit the line was verified against:
 [`<file>:<line>`](https://github.com/<owner>/<repo>/blob/<headRefOid>/<path>#L<line>)
 ```
 
-e.g. `` [`sentry-error-extractor.ts:36`](https://github.com/cioplenu/frontend/blob/c634821.../projects/library/common/services/sentry/sentry-error-extractor.ts#L36) ``.
+e.g. `` [`date-utils.ts:36`](https://github.com/my-org/frontend/blob/c634821.../src/utils/date-utils.ts#L36) ``.
 
 Never a bare backtick-only citation, never the plain PR URL, never a path with no line.
 
@@ -52,7 +52,7 @@ re-review's old report is stale). Keep the whole thing short, a flat structure, 
 
 ```markdown
 # <repo-short-name>#<number> — <title>
-<url> · ticket: <DEV-XXXX or "none found", one line, flag here if scope doesn't match the PR>
+<url> · ticket: <ticket ID, e.g. PROJ-123, or "none found", one line, flag here if scope doesn't match the PR>
 Reviewed by: <comma-separated list of whichever layers you were actually told to run this time, e.g.
 "repo rubric, code-review skill (low), review-criteria.md" — leave out any layer you weren't asked to
 run, and add the one-off ask itself (not just "Layer 4") if there was one>

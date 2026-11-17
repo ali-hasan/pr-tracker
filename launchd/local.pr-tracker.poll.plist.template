@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.ops1.pr-review-poll</string>
+    <string>local.pr-tracker.poll</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>

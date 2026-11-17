@@ -14,7 +14,7 @@ AGENTS_DIR="$HOME/Library/LaunchAgents"
 
 mkdir -p "$AGENTS_DIR"
 
-for name in com.ops1.pr-review-poll com.ops1.pr-tracker; do
+for name in local.pr-tracker.poll local.pr-tracker; do
   template="$SCRIPT_DIR/$name.plist.template"
   dest="$AGENTS_DIR/$name.plist"
   sed -e "s#__BASE_DIR__#$BASE_DIR#g" -e "s#__HOME__#$HOME#g" "$template" > "$dest"
@@ -24,7 +24,7 @@ for name in com.ops1.pr-review-poll com.ops1.pr-tracker; do
 done
 
 echo
-echo "com.ops1.pr-review-poll runs every 30 minutes as a fallback (RunAtLoad=false, so it"
+echo "local.pr-tracker.poll runs every 30 minutes as a fallback (RunAtLoad=false, so it"
 echo "won't fire right now) — while PR Tracker.app is open it reviews new/updated PRs within"
 echo "about 45 seconds on its own, this is just the backstop for when the app isn't running."
-echo "com.ops1.pr-tracker launches now and on every login."
+echo "local.pr-tracker launches now and on every login."

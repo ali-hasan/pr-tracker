@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.ops1.pr-tracker</string>
+    <string>local.pr-tracker</string>
     <key>ProgramArguments</key>
     <array>
         <string>__HOME__/Applications/PR Tracker.app/Contents/MacOS/pr-tracker</string>

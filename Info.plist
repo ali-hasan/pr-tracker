@@ -7,7 +7,7 @@
     <key>CFBundleDisplayName</key>
     <string>PR Tracker</string>
     <key>CFBundleIdentifier</key>
-    <string>com.ops1.pr-tracker</string>
+    <string>local.pr-tracker</string>
     <key>CFBundleVersion</key>
     <string>1.0</string>
     <key>CFBundleShortVersionString</key>

@@ -5,10 +5,10 @@
 # then edit REPOS_DIR below. CLAUDE_BIN only needs editing if auto-detection doesn't find it.
 
 # Absolute path to the directory where you've checked out the repos this reviews — NOT this
-# repo. E.g. if you have ~/workspace/ops1/api and ~/workspace/ops1/frontend, this is
-# ~/workspace/ops1. There's no way to infer this one: pr-tracker is its own repo and can be
+# repo. E.g. if you have ~/code/api and ~/code/frontend, this is
+# ~/code. There's no way to infer this one: pr-tracker is its own repo and can be
 # cloned anywhere, with no fixed relationship to where you keep your actual code checkouts.
-REPOS_DIR="/Users/yourname/workspace/ops1"
+REPOS_DIR="/Users/yourname/code"
 
 # Optional. Left blank, every script that needs `claude` auto-detects it (after adding
 # ~/.local/bin and the usual Homebrew/system dirs to PATH). Only set this if that doesn't
