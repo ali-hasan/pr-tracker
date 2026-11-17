@@ -2,7 +2,7 @@
 /target
 /tracker.log
 
-# Per-machine config — copy the .example files instead (see SETUP.md)
+# Per-machine config — copy the .example files instead (see README.md)
 /.cargo/config.toml
 /pr-review/config.sh
 /pr-review/repos.conf
