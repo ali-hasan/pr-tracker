@@ -190,9 +190,15 @@ if [[ -n "$MODEL" ]]; then
   MODEL_ARGS=(--model "$MODEL")
 fi
 
+RUN_STARTED="$(mktemp -t pr-review-run)"
 "$CLAUDE_BIN" -p "$PROMPT" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} \
   --allowedTools "Bash(gh pr view:*)" "Bash(gh pr diff:*)" "Bash(gh api repos/${REPO%%/*}/*)" "Bash(osascript:*)" "Bash(open vscode://*)" "Read" "Write" "mcp__youtrack__get_issue" "Skill" \
   --permission-prompts none \
   >> "$LOG_FILE" 2>&1
+
+# Point each new report's line links into the PR's diff (only reports written by this run).
+find "$BASE_DIR/pr-reviews" -name '*.json' -newer "$RUN_STARTED" -print0 2>/dev/null \
+  | xargs -0 python3 -I "$SCRIPT_DIR/link-to-pr-diff.py" >> "$LOG_FILE" 2>&1
+rm -f "$RUN_STARTED"
 
 echo "=== Manual review finished: $(date), $REPO#$NUMBER ===" >> "$LOG_FILE"

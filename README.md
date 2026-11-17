@@ -28,6 +28,7 @@ each review:  claude -p … --permission-prompts none
               ├─ layer 2: the `code-review` Claude Code skill
               ├─ layer 3: pr-review/review-criteria.md
               └─ writes pr-reviews/<repo>-<n>.md and a .json sidecar, then notifies you
+              then link-to-pr-diff.py points the report's line links into the PR's diff
 
 Publish…      gh api POST repos/<owner>/<repo>/pulls/<n>/reviews   (no event, so it stays a draft)
 ```
@@ -101,6 +102,7 @@ No tokens are stored in this repo; both tools use their own logins.
 | `pr-review/review-one.sh` | One PR, with options chosen in the app |
 | `pr-review/review-local.sh` | A local branch against its base branch |
 | `pr-review/repos.sh` | Reads `repos.conf` for the scripts |
+| `pr-review/link-to-pr-diff.py` | Makes a report's line links open in the PR's "Files changed" tab |
 | `src/main.rs` | The tracker app (Rust, egui) |
 
 Created at runtime and gitignored: `config.sh`, `repos.conf`, `.cargo/config.toml`, the reports in
