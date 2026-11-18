@@ -54,7 +54,7 @@ re-review's old report is stale). Keep the whole thing short, a flat structure, 
 # <repo-short-name>#<number> — <title>
 <url> · ticket: <ticket ID, e.g. PROJ-123, or "none found", one line, flag here if scope doesn't match the PR>
 Reviewed by: <comma-separated list of whichever layers you were actually told to run this time, e.g.
-"repo rubric, code-review skill (low), review-criteria.md" — leave out any layer you weren't asked to
+"repo rubric, code-review skill (medium), review-criteria.md" — leave out any layer you weren't asked to
 run, and add the one-off ask itself (not just "Layer 4") if there was one>
 
 <two or three plain sentences on what this PR actually does/is trying to achieve, in your own words

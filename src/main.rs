@@ -178,7 +178,7 @@ impl Default for ReviewOptions {
         Self {
             repo_rubric: true,
             code_review_skill: true,
-            effort: "low".to_string(),
+            effort: "medium".to_string(),
             project_criteria: true,
             notes: String::new(),
             model: String::new(),

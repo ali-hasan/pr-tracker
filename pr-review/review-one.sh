@@ -35,7 +35,7 @@ REPO=""
 NUMBER=""
 LAYER1=true
 LAYER2=true
-EFFORT="low"
+EFFORT="medium"
 LAYER3=true
 NOTES=""
 MODEL=""
@@ -83,7 +83,7 @@ if [[ "$LAYER2" == true ]]; then
   LAYERS+=$(printf '\n**Layer 2 — the `code-review` skill.** Invoke it (`Skill` tool, skill name `code-review`) with args `%s <PR URL>`. Pass `%s` exactly as the effort level, do not change it.\n' "$EFFORT" "$EFFORT")
 fi
 if [[ "$LAYER3" == true ]]; then
-  LAYERS+=$(printf '\n**Layer 3 — your own criteria.** Read %s/pr-review/review-criteria.md and apply anything written there on top of the layers above (it may be empty, skip if so).\n' "$BASE_DIR")
+  LAYERS+=$(printf '\n**Layer 3 — your own criteria.** Read %s/pr-review/review-criteria.md and apply anything written there on top of the layers above (it may be missing or empty, skip if so).\n' "$BASE_DIR")
 fi
 if [[ -n "$NOTES" ]]; then
   LAYERS+=$(printf '\n**Layer 4 — this runs specific ask.** %s Weight this heavily, its what was specifically asked to be looked at on this re-run.\n' "$NOTES")
@@ -129,6 +129,13 @@ ticket's scope doesn't obviously match the diff, say so explicitly.
 
 ### Review the diff
 {{LAYERS}}
+**Reading code beyond the diff.** Your local checkout may be on another branch with uncommitted
+work, so never read the PR's files from its working tree. Fetch the PR's commit with
+`git -C {{LOCAL_PATH}} fetch -q origin <headRefOid>`, then read a file at that commit with
+`git -C {{LOCAL_PATH}} show <headRefOid>:<path>` and find usages or existing examples with
+`git -C {{LOCAL_PATH}} grep -n <pattern> <headRefOid> -- <paths>`. Never check out, create branches,
+or change the working tree.
+
 Do NOT check out the branch, run a build, or run tests. Do not post findings anywhere, only write the
 local report. Collapse every layer above into ONE flat list of comments — report-format.md covers the
 voice and the exact anchoring.
@@ -192,7 +199,7 @@ fi
 
 RUN_STARTED="$(mktemp -t pr-review-run)"
 "$CLAUDE_BIN" -p "$PROMPT" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} \
-  --allowedTools "Bash(gh pr view:*)" "Bash(gh pr diff:*)" "Bash(gh api repos/${REPO%%/*}/*)" "Bash(osascript:*)" "Bash(open vscode://*)" "Read" "Write" "mcp__youtrack__get_issue" "Skill" \
+  --allowedTools "Bash(gh pr view:*)" "Bash(gh pr diff:*)" "Bash(gh api repos/${REPO%%/*}/*)" "Bash(git -C $LOCAL_PATH fetch:*)" "Bash(git -C $LOCAL_PATH show:*)" "Bash(git -C $LOCAL_PATH grep:*)" "Bash(git -C $LOCAL_PATH log:*)" "Bash(osascript:*)" "Bash(open vscode://*)" "Read" "Grep" "Glob" "Edit(/$BASE_DIR/pr-reviews/**)" "Edit(/$BASE_DIR/pr-review/state.json)" "Edit(/$BASE_DIR/pr-review/status.json)" "mcp__youtrack__get_issue" "Skill" \
   --permission-prompts none \
   >> "$LOG_FILE" 2>&1
 

@@ -82,7 +82,8 @@ No tokens are stored in this repo; both tools use their own logins.
   for every automatic review. The **Default model** dropdown in the app edits the same line. The
   **Review…** panel can pick a different model for a single run. Leave it empty to use your Claude
   Code default. Each run logs its model in `pr-review/run.log`.
-- **Your own rules.** Add bullets to `pr-review/review-criteria.md` and every review applies them.
+- **Your own rules.** Create `pr-review/review-criteria.md` with your own review rules and every
+  review applies them. It's gitignored, so everyone keeps their own. Without it, reviews skip this layer.
 - **Writing style.** `report-format.md` loads a personal `my-voice` skill from
   `~/.claude/skills/`. Write your own, or delete that line to get Claude's default voice. A missing
   skill doesn't break anything.
@@ -97,7 +98,6 @@ No tokens are stored in this repo; both tools use their own logins.
 |---|---|
 | `pr-review/prompt.md` | Instructions for the scheduled run |
 | `pr-review/report-format.md` | Report structure, link format, voice, JSON sidecar shape |
-| `pr-review/review-criteria.md` | Your standing review rules (empty by default) |
 | `pr-review/run.sh` | Scheduled run: checks for new work, then starts Claude |
 | `pr-review/review-one.sh` | One PR, with options chosen in the app |
 | `pr-review/review-local.sh` | A local branch against its base branch |
@@ -105,7 +105,7 @@ No tokens are stored in this repo; both tools use their own logins.
 | `pr-review/link-to-pr-diff.py` | Makes a report's line links open in the PR's "Files changed" tab |
 | `src/main.rs` | The tracker app (Rust, egui) |
 
-Created at runtime and gitignored: `config.sh`, `repos.conf`, `.cargo/config.toml`, the reports in
+Created at runtime and gitignored: `config.sh`, `repos.conf`, `review-criteria.md`, `.cargo/config.toml`, the reports in
 `pr-reviews/`, logs, and these state files in `pr-review/`:
 
 | File | Contents |

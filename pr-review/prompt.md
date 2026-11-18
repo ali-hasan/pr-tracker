@@ -72,13 +72,20 @@ This decides auto-approvable vs. needs-human-review per that repo's own stated c
 reasoning for this to one short line — name the rule, don't quote or restate it at length.
 
 **Layer 2 — the `code-review` skill.** Invoke it (`Skill` tool, skill name `code-review`) with args
-`low <PR URL>` — ALWAYS pass `low` explicitly as the effort level. Do not omit it and do not use a
-higher level: this runs unattended on a timer, and higher effort levels spin up many more reviewer
-subagents per PR, which has caused a single run to take over an hour. `low` still produces real,
-specific findings at a fraction of the cost.
+`medium <PR URL>` — ALWAYS pass `medium` explicitly as the effort level. Do not omit it and do not use
+a higher level: this runs unattended on a timer, and higher effort levels spin up many more reviewer
+subagents per PR, which has caused a single run to take over an hour.
 
 **Layer 3 — your own criteria.** Read {{BASE_DIR}}/pr-review/review-criteria.md
-and apply anything written there on top of the two layers above (it may be empty — skip if so).
+and apply anything written there on top of the two layers above (it may be missing or empty — skip if so).
+
+**Reading code beyond the diff.** Your local checkout may be on another branch with uncommitted
+work, so never read the PR's files from its working tree. Using that repo's local path from the table
+above, fetch the PR's commit with
+`git -C <local path> fetch -q origin <headRefOid>`, then read a file at that commit with
+`git -C <local path> show <headRefOid>:<path>` and find usages or existing examples with
+`git -C <local path> grep -n <pattern> <headRefOid> -- <paths>`. Never check out, create branches,
+or change the working tree.
 
 Do NOT check out the branch, run a build, or run tests. This is a fetch-only review: read the diff,
 the ticket, and the repo's stated conventions, and reason about correctness, scope, and the repo's

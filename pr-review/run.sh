@@ -113,6 +113,18 @@ for org in $(repo_orgs); do
   GH_API_TOOLS+=("Bash(gh api repos/$org/*)")
 done
 
+# Read-only git commands in each checkout, so a review can read files and search code at the
+# PR's own commit without touching your working tree.
+GIT_READ_TOOLS=()
+for dir in "${REPO_LOCAL_DIRS[@]}"; do
+  for sub in fetch show grep log; do
+    GIT_READ_TOOLS+=("Bash(git -C $REPOS_DIR/$dir $sub:*)")
+  done
+done
+
+# Reviews may only write their reports and the two state files, nothing else on disk.
+WRITE_TOOLS=("Edit(/$BASE_DIR/pr-reviews/**)" "Edit(/$BASE_DIR/pr-review/state.json)" "Edit(/$BASE_DIR/pr-review/status.json)")
+
 MODEL_ARGS=()
 if [[ -n "$REVIEW_MODEL" ]]; then
   MODEL_ARGS=(--model "$REVIEW_MODEL")
@@ -120,7 +132,7 @@ fi
 
 RUN_STARTED="$(mktemp -t pr-review-run)"
 "$CLAUDE_BIN" -p "$PROMPT" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} \
-  --allowedTools "Bash(gh search prs:*)" "Bash(gh pr view:*)" "Bash(gh pr diff:*)" "${GH_API_TOOLS[@]}" "Bash(osascript:*)" "Bash(open vscode://*)" "Read" "Write" "mcp__youtrack__get_issue" "Skill" \
+  --allowedTools "Bash(gh search prs:*)" "Bash(gh pr view:*)" "Bash(gh pr diff:*)" "${GH_API_TOOLS[@]}" "${GIT_READ_TOOLS[@]}" "Bash(osascript:*)" "Bash(open vscode://*)" "Read" "Grep" "Glob" "${WRITE_TOOLS[@]}" "mcp__youtrack__get_issue" "Skill" \
   --permission-prompts none \
   >> "$LOG_FILE" 2>&1
 CLAUDE_EXIT=$?
