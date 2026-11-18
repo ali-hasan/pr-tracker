@@ -98,7 +98,8 @@ struct PublishDraft {
     sidecar: ReviewSidecar,
     include: Vec<bool>,
     inline: Vec<bool>,
-    result: Option<Result<String, String>>,
+    /// On success: the review's URL and the message to show.
+    result: Option<Result<(String, String), String>>,
     publishing: bool,
 }
 
@@ -634,7 +635,7 @@ fn load_sidecar(report_path: &str) -> Result<ReviewSidecar, String> {
 /// review's overall text instead. Leaving out the `event` field is what
 /// keeps this a draft: nothing is submitted, approved, or requested-changed
 /// until the user finishes it themselves in GitHub's own review screen.
-fn publish_pending_review(key: &str, draft: &PublishDraft) -> Result<String, String> {
+fn publish_pending_review(key: &str, draft: &PublishDraft) -> Result<(String, String), String> {
     let (repo, number) = key
         .split_once('#')
         .ok_or_else(|| format!("malformed PR key: {key}"))?;
@@ -673,6 +674,12 @@ fn publish_pending_review(key: &str, draft: &PublishDraft) -> Result<String, Str
         format!("Also flagged (not directly commentable on this diff):\n{}", folded.join("\n"))
     };
 
+    // GitHub allows only one pending review per person per PR, so if you've already started
+    // reviewing by hand, the comments go into that draft instead of a second one.
+    if let Some(pending) = find_pending_review(repo, number)? {
+        return add_to_pending_review(repo, number, &pending, &draft.sidecar.head_ref_oid, &inline_comments, &body);
+    }
+
     let payload = PublishPayload {
         commit_id: &draft.sidecar.head_ref_oid,
         body,
@@ -680,39 +687,182 @@ fn publish_pending_review(key: &str, draft: &PublishDraft) -> Result<String, Str
     };
     let payload_bytes =
         serde_json::to_vec(&payload).map_err(|e| format!("failed to build request body: {e}"))?;
+    let output = run_gh(
+        &["api", "--method", "POST", &format!("repos/{repo}/pulls/{number}/reviews"), "--input", "-"],
+        Some(&payload_bytes),
+    )?;
 
+    let html_url = serde_json::from_slice::<serde_json::Value>(&output)
+        .ok()
+        .and_then(|v| v.get("html_url").and_then(|u| u.as_str().map(str::to_string)));
+    Ok((
+        html_url.unwrap_or_else(|| format!("https://github.com/{repo}/pull/{number}/files")),
+        "Draft review created and opened in your browser.".to_string(),
+    ))
+}
+
+/// Runs `gh` with the given arguments (and optional stdin) and returns its stdout, or its
+/// stderr as the error.
+fn run_gh(args: &[&str], stdin: Option<&[u8]>) -> Result<Vec<u8>, String> {
     let mut child = Command::new(gh_path())
-        .args([
-            "api",
-            "--method",
-            "POST",
-            &format!("repos/{repo}/pulls/{number}/reviews"),
-            "--input",
-            "-",
-        ])
-        .stdin(Stdio::piped())
+        .args(args)
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to start gh: {e}"))?;
-    child
-        .stdin
-        .take()
-        .expect("piped stdin")
-        .write_all(&payload_bytes)
-        .map_err(|e| format!("failed to send request body to gh: {e}"))?;
+    if let Some(bytes) = stdin {
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(bytes)
+            .map_err(|e| format!("failed to send request body to gh: {e}"))?;
+    }
     let output = child
         .wait_with_output()
         .map_err(|e| format!("gh didn't finish: {e}"))?;
-
     if !output.status.success() {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
+    Ok(output.stdout)
+}
 
-    let html_url = serde_json::from_slice::<serde_json::Value>(&output.stdout)
-        .ok()
-        .and_then(|v| v.get("html_url").and_then(|u| u.as_str().map(str::to_string)));
-    Ok(html_url.unwrap_or_else(|| format!("https://github.com/{repo}/pull/{number}/files")))
+/// Your own unsubmitted review on a PR. GitHub only ever shows a pending review to the
+/// person who started it, so any pending review in the list is yours.
+struct PendingReview {
+    id: u64,
+    node_id: String,
+    commit_id: String,
+    body: String,
+    html_url: String,
+}
+
+fn find_pending_review(repo: &str, number: &str) -> Result<Option<PendingReview>, String> {
+    let output = run_gh(
+        &[
+            "api",
+            "--paginate",
+            &format!("repos/{repo}/pulls/{number}/reviews"),
+            "--jq",
+            r#".[] | select(.state == "PENDING") | {id, node_id, commit_id, body, html_url}"#,
+        ],
+        None,
+    )?;
+    let Some(first) = String::from_utf8_lossy(&output).lines().find(|l| !l.trim().is_empty()).map(str::to_string)
+    else {
+        return Ok(None);
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(&first).map_err(|e| format!("couldn't read your pending review: {e}"))?;
+    let text = |field: &str| value.get(field).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    Ok(Some(PendingReview {
+        id: value.get("id").and_then(|v| v.as_u64()).ok_or("pending review has no id")?,
+        node_id: text("node_id"),
+        commit_id: text("commit_id"),
+        body: text("body"),
+        html_url: text("html_url"),
+    }))
+}
+
+const ADD_THREAD_MUTATION: &str = "mutation($review: ID!, $path: String!, $line: Int!, $body: String!) {
+  addPullRequestReviewThread(input: {pullRequestReviewId: $review, path: $path, line: $line, side: RIGHT, body: $body}) { thread { id } }
+}";
+
+/// Adds the selected comments to a pending review you already started. Comments already
+/// in that draft with the same file and text are skipped, so publishing twice doesn't
+/// duplicate them. Comments that can't go inline are appended to the draft's own text.
+fn add_to_pending_review(
+    repo: &str,
+    number: &str,
+    pending: &PendingReview,
+    report_commit: &str,
+    inline_comments: &[PublishComment],
+    folded_body: &str,
+) -> Result<(String, String), String> {
+    // Line numbers in the report belong to the commit it reviewed. A draft started on another
+    // commit would put them on the wrong lines, so stop instead of guessing.
+    if pending.commit_id != report_commit {
+        return Err(format!(
+            "you already have a pending review on this PR, started on commit {} but this report is for {}. \
+             Submit or discard that draft on GitHub, or re-run the review, then publish again.",
+            short_sha(&pending.commit_id),
+            short_sha(report_commit)
+        ));
+    }
+
+    let existing = run_gh(
+        &[
+            "api",
+            "--paginate",
+            &format!("repos/{repo}/pulls/{number}/reviews/{}/comments", pending.id),
+            "--jq",
+            ".[] | [.path, .body]",
+        ],
+        None,
+    )?;
+    let existing: HashSet<(String, String)> = String::from_utf8_lossy(&existing)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<(String, String)>(l).ok())
+        .collect();
+
+    let mut added = 0;
+    let mut skipped = 0;
+    for comment in inline_comments {
+        if existing.contains(&(comment.path.to_string(), comment.body.to_string())) {
+            skipped += 1;
+            continue;
+        }
+        let query = format!("query={ADD_THREAD_MUTATION}");
+        let review = format!("review={}", pending.node_id);
+        let path = format!("path={}", comment.path);
+        let line = format!("line={}", comment.line);
+        let body = format!("body={}", comment.body);
+        run_gh(
+            &["api", "graphql", "-f", &query, "-f", &review, "-f", &path, "-F", &line, "-f", &body],
+            None,
+        )
+        .map_err(|e| {
+            format!("added {added} comment(s) to your pending review, then failed on {}:{}: {e}", comment.path, comment.line)
+        })?;
+        added += 1;
+    }
+
+    let mut text_updated = false;
+    if !folded_body.is_empty() && !pending.body.contains(folded_body) {
+        let new_body = if pending.body.trim().is_empty() {
+            folded_body.to_string()
+        } else {
+            format!("{}\n\n{folded_body}", pending.body.trim_end())
+        };
+        let payload = serde_json::to_vec(&serde_json::json!({ "body": new_body }))
+            .map_err(|e| format!("failed to build request body: {e}"))?;
+        run_gh(
+            &["api", "--method", "PUT", &format!("repos/{repo}/pulls/{number}/reviews/{}", pending.id), "--input", "-"],
+            Some(&payload),
+        )
+        .map_err(|e| format!("added {added} comment(s) to your pending review, but couldn't update its text: {e}"))?;
+        text_updated = true;
+    }
+
+    let mut message = format!("Added {added} comment(s) to the pending review you'd already started");
+    if skipped > 0 {
+        message.push_str(&format!(", skipped {skipped} already there"));
+    }
+    if text_updated {
+        message.push_str(", and added the rest to its text");
+    }
+    message.push_str(". Opened it in your browser.");
+    let url = if pending.html_url.is_empty() {
+        format!("https://github.com/{repo}/pull/{number}/files")
+    } else {
+        pending.html_url.clone()
+    };
+    Ok((url, message))
+}
+
+fn short_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(7)]
 }
 
 fn bool_str(b: bool) -> &'static str {
@@ -1840,10 +1990,10 @@ impl eframe::App for PrTrackerApp {
                         if let Some(result) = &draft.result {
                             ui.add_space(4.0);
                             match result {
-                                Ok(_) => banner(
+                                Ok((_, message)) => banner(
                                     ui,
                                     egui::Color32::from_rgb(98, 209, 150),
-                                    "Draft review created and opened in your browser.",
+                                    message.as_str(),
                                 ),
                                 Err(e) => banner(
                                     ui,
@@ -1872,7 +2022,7 @@ impl eframe::App for PrTrackerApp {
                                 // Blocks the UI for the one GitHub round-trip — a deliberate,
                                 // rare click, not worth a background thread and a result channel for.
                                 let result = publish_pending_review(&key, draft);
-                                if let Ok(url) = &result {
+                                if let Ok((url, _)) = &result {
                                     open_url(url);
                                 }
                                 draft.result = Some(result);
