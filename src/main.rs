@@ -598,18 +598,13 @@ fn remove_reviewed(key: &str) {
     delete_report(key);
 }
 
-/// Cleans up PR-keyed status.json entries for PRs that have actually merged or
-/// closed (not just "no longer requesting my review but still open" — that case is
-/// `still_open` and stays visible via `finished_still_open`). Once a PR is gone for
-/// good there's no row left to click Remove on — closed/merged PRs are never shown —
-/// so without this, their reports would sit in pr-reviews/ forever with no way to
-/// clear them. Local-branch keys (no `#`) are left alone; they have no GitHub PR to
-/// check a merge/close state against.
-fn prune_closed_prs(assigned_keys: &HashSet<String>, still_open: &HashSet<String>) {
-    for key in load_status_keys() {
-        if is_pr_key(&key) && !assigned_keys.contains(&key) && !still_open.contains(&key) {
-            delete_report(&key);
-        }
+/// Deletes the reports of PRs that GitHub says are merged or closed. Those PRs are
+/// never shown, so there's no row left to click Remove on, and without this their
+/// reports would sit in pr-reviews/ forever. Only a confirmed answer counts: if the
+/// state check fails (network blip, rate limit), the report is kept.
+fn prune_closed_prs(closed_keys: &HashSet<String>) {
+    for key in closed_keys {
+        delete_report(key);
     }
 }
 
@@ -2106,20 +2101,18 @@ fn fetch_assigned(repos: &[String]) -> Result<Vec<GhPr>, String> {
     serde_json::from_slice(&output.stdout).map_err(|e| format!("failed to parse gh output: {e}"))
 }
 
-fn is_pr_still_open(key: &str) -> bool {
-    let Some((repo, number)) = key.split_once('#') else {
-        return false;
-    };
-    let output = Command::new(gh_path())
+/// The PR's state as GitHub reports it (`OPEN`, `MERGED` or `CLOSED`), or `None` when
+/// the check itself failed, so callers can tell "closed" apart from "couldn't ask".
+fn fetch_pr_state(key: &str) -> Option<String> {
+    let (repo, number) = key.split_once('#')?;
+    let out = Command::new(gh_path())
         .args(["pr", "view", number, "--repo", repo, "--json", "state"])
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => serde_json::from_slice::<GhPrState>(&out.stdout)
-            .map(|s| s.state == "OPEN")
-            .unwrap_or(false),
-        _ => false,
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
     }
+    serde_json::from_slice::<GhPrState>(&out.stdout).ok().map(|s| s.state)
 }
 
 fn load_status_keys() -> Vec<String> {
@@ -2255,17 +2248,25 @@ fn main() -> eframe::Result<()> {
                     .collect(),
                 Err(_) => HashSet::new(),
             };
-            let still_open: HashSet<String> = load_status_keys()
-                .into_iter()
-                .filter(|key| !assigned_keys.contains(key))
-                .filter(|key| is_pr_still_open(key))
-                .collect();
-            // Only once the search itself actually succeeded — on a transient `gh` failure
-            // `assigned_keys` comes back empty, which would otherwise look exactly like
-            // every tracked PR merging at once and wipe their reports.
-            if result.is_ok() {
-                prune_closed_prs(&assigned_keys, &still_open);
+            // Reviewed PRs that no longer request my review: keep showing them while
+            // they're open, delete their reports once merged or closed. A failed state
+            // check keeps the row as it is, so a network blip can't wipe a report.
+            let mut still_open = HashSet::new();
+            let mut closed = HashSet::new();
+            for key in load_status_keys() {
+                if !is_pr_key(&key) || assigned_keys.contains(&key) {
+                    continue;
+                }
+                match fetch_pr_state(&key).as_deref() {
+                    Some("MERGED") | Some("CLOSED") => {
+                        closed.insert(key);
+                    }
+                    _ => {
+                        still_open.insert(key);
+                    }
+                }
             }
+            prune_closed_prs(&closed);
             let dismissed = prune_dismissed();
 
             let mut s = shared.lock().unwrap();
