@@ -3,6 +3,10 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BASE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"  # this repo's own root (pr-tracker/)
+# Launched from the app or launchd we start in `/`. Work from this repo instead, so nothing
+# the review does from its working folder wanders into Desktop or Documents and makes macOS
+# ask PR Tracker for folder access.
+cd "$BASE_DIR"
 
 if [[ ! -f "$SCRIPT_DIR/config.sh" ]]; then
   echo "review-local.sh: $SCRIPT_DIR/config.sh not found — copy config.sh.example to config.sh and fill in CLAUDE_BIN + REPOS_DIR" >&2
