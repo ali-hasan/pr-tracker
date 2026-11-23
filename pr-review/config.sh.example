@@ -1,0 +1,26 @@
+# Copy this file to config.sh (gitignored, never pushed — config.sh itself holds nothing
+# secret, but it's machine-specific and there's no reason to commit someone else's paths).
+#
+# cp config.sh.example config.sh
+# then edit REPOS_DIR below. CLAUDE_BIN only needs editing if auto-detection doesn't find it.
+
+# Absolute path to the directory where you've checked out the repos this reviews — NOT this
+# repo. E.g. if you have ~/code/api and ~/code/frontend, this is
+# ~/code. There's no way to infer this one: pr-tracker is its own repo and can be
+# cloned anywhere, with no fixed relationship to where you keep your actual code checkouts.
+REPOS_DIR="/Users/yourname/code"
+
+# Optional. Left blank, every script that needs `claude` auto-detects it (after adding
+# ~/.local/bin and the usual Homebrew/system dirs to PATH). Only set this if that doesn't
+# find yours — e.g. an install in a less common location — or to pin a specific one:
+# CLAUDE_BIN="/Users/yourname/.local/bin/claude"
+CLAUDE_BIN=""
+
+# Base model for every review (also editable from the app's "Default model" dropdown, which
+# rewrites this line): the ones the app and the half-hourly job start on their own,
+# and the "Default" choice in the app's Review options panel (where you can still pick a
+# different model for a single run). Use an alias like "opus", "sonnet" or "fable", which
+# always means the latest of that family, or a full model name. Leave blank to use your
+# Claude Code default. Checking for new PRs never uses a model; Claude only starts when
+# there's something to review.
+REVIEW_MODEL="opus"

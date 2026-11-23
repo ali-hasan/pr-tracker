@@ -1,0 +1,20 @@
+[package]
+name = "pr-tracker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Only the eframe parts this app uses: Metal drawing (wgpu), accessibility, clipboard paste in the
+# notes box, and system fonts. Its bundled fonts and the unused OpenGL backend are left out, and
+# "links" (which pulls the webbrowser crate and its full Unicode/IDNA tables just to open a URL)
+# is skipped too — PR links are opened with a direct `open` call instead, see open_url().
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "system_fonts", "wgpu"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
